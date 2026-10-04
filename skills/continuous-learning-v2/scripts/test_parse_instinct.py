@@ -37,6 +37,7 @@ load_all_instincts = _mod.load_all_instincts
 load_project_only_instincts = _mod.load_project_only_instincts
 _load_instincts_from_dir = _mod._load_instincts_from_dir
 cmd_status = _mod.cmd_status
+cmd_ingest = _mod.cmd_ingest
 cmd_projects = _mod.cmd_projects
 _promote_specific = _mod._promote_specific
 _promote_auto = _mod._promote_auto
@@ -427,6 +428,49 @@ def test_detect_project_creates_directories(patch_globals, monkeypatch, tmp_path
     assert project["instincts_personal"].exists()
     assert project["instincts_inherited"].exists()
     assert (project["evolved_dir"] / "skills").exists()
+
+
+def test_detect_project_non_persisting_has_no_storage_or_registry_side_effects(
+    patch_globals, monkeypatch, tmp_path
+):
+    """persist=False should detect identity without mutating CLv2 state."""
+    fake_repo = tmp_path / "readonly-repo"
+    fake_repo.mkdir()
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(fake_repo))
+
+    def mock_run(cmd, **kwargs):
+        if "rev-parse" in cmd:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=str(fake_repo) + "\n",
+                stderr="",
+            )
+        if "get-url" in cmd:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="https://github.com/test/readonly-repo.git\n",
+                stderr="",
+            )
+        return SimpleNamespace(returncode=1, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", mock_run)
+
+    project = detect_project(persist=False)
+
+    assert project["id"] != "global"
+    assert project["name"] == "readonly-repo"
+    assert project["root"] == str(fake_repo)
+    assert project["project_dir"] == patch_globals["projects_dir"] / project["id"]
+
+    assert not project["project_dir"].exists()
+    assert not project["instincts_personal"].exists()
+    assert not project["instincts_inherited"].exists()
+    assert not project["evolved_dir"].exists()
+    assert not patch_globals["registry_file"].exists()
+    assert not (
+        patch_globals["registry_file"].parent
+        / f".{patch_globals['registry_file'].name}.lock"
+    ).exists()
 
 
 # ─────────────────────────────────────────────
@@ -1418,3 +1462,288 @@ def test_cmd_prune_empty_pending_nothing_to_do(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "No pending instincts older than 30 days." in out
     assert "[DRY RUN]" not in out
+
+
+# ── cmd_ingest ───────────────────────────────
+
+def _analysis(instincts=None, status="analysis_complete"):
+    return json.dumps({
+        "status": status,
+        "project_id": "evil",
+        "project_name": "evil",
+        "source": "evil",
+        "scope": "global",
+        "destination": "/tmp/evil",
+        "filename": "../evil.md",
+        "confidence": 0.99,
+        "instincts": instincts if instincts is not None else [_ingest_instinct()],
+    })
+
+
+def _ingest_instinct(instinct_id="prefer-tests", count=3, domain="testing", last_observed="2026-10-01T12:00:00Z"):
+    return {
+        "id": instinct_id,
+        "trigger": "when adding behavior",
+        "domain": domain,
+        "action": "Write the focused test first.",
+        "confidence": 0.01,
+        "source": "model-supplied",
+        "scope": "global",
+        "project_id": "wrong",
+        "project_name": "wrong",
+        "evidence": {
+            "count": count,
+            "pattern": "user asks for TDD repeatedly",
+            "last_observed": last_observed,
+            "session_ids": ["s1", "s2", "s3"],
+        },
+    }
+
+
+def _result_file(project, content):
+    path = project["project_dir"].parent / "observer-result.json"
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def _run_ingest(project, monkeypatch, result=None, dry_run=False):
+    monkeypatch.setattr(_mod, "detect_project", lambda persist=True: project)
+    result_path = result
+    if result is None or (isinstance(result, str) and not Path(result).exists()):
+        result_path = _result_file(project, result or _analysis())
+    return cmd_ingest(SimpleNamespace(result=str(result_path), dry_run=dry_run))
+
+
+def _read_personal(project, instinct_id="prefer-tests"):
+    return parse_instinct_file((project["instincts_personal"] / f"{instinct_id}.md").read_text(encoding="utf-8"))[0]
+
+
+def test_ingest_creates_project_personal_instinct(patch_globals, monkeypatch):
+    project = _make_project(patch_globals, pid="proj123", pname="real-project")
+    assert _run_ingest(project, monkeypatch) == 0
+
+    path = project["instincts_personal"] / "prefer-tests.md"
+    assert path.exists()
+    assert not (project["instincts_inherited"] / "prefer-tests.md").exists()
+    instinct = _read_personal(project)
+    assert instinct["confidence"] == 0.5
+    assert "Write the focused test first." in instinct["content"]
+
+
+def test_ingest_reads_result_from_json_file(patch_globals, monkeypatch):
+    project = _make_project(patch_globals)
+    result = _result_file(project, _analysis([_ingest_instinct(instinct_id="from-file")]))
+    assert _run_ingest(project, monkeypatch, result=result) == 0
+    assert (project["instincts_personal"] / "from-file.md").exists()
+
+
+def test_ingest_rejects_nonexistent_result_file(patch_globals, monkeypatch):
+    project = _make_project(patch_globals)
+    monkeypatch.setattr(_mod, "detect_project", lambda persist=True: project)
+    missing = project["project_dir"].parent / "missing.json"
+    assert cmd_ingest(SimpleNamespace(result=str(missing), dry_run=False)) == 1
+    assert not list(project["instincts_personal"].glob("*.md"))
+
+
+def test_ingest_rejects_directory_result(patch_globals, monkeypatch):
+    project = _make_project(patch_globals)
+    monkeypatch.setattr(_mod, "detect_project", lambda persist=True: project)
+    assert cmd_ingest(SimpleNamespace(result=str(project["project_dir"]), dry_run=False)) == 1
+    assert not list(project["instincts_personal"].glob("*.md"))
+
+
+def test_ingest_rejects_global_context(patch_globals, monkeypatch, capsys):
+    global_project = {
+        "id": "global",
+        "name": "global",
+        "project_dir": patch_globals["homunculus"],
+        "instincts_personal": patch_globals["global_personal"],
+    }
+    assert _run_ingest(global_project, monkeypatch) == 1
+    assert "refusing to ingest" in capsys.readouterr().err
+
+
+def test_ingest_rejects_incomplete_status(patch_globals, monkeypatch):
+    project = _make_project(patch_globals)
+    assert _run_ingest(project, monkeypatch, result=_analysis(status="pending")) == 1
+    assert not list(project["instincts_personal"].glob("*.md"))
+
+
+def test_ingest_rejects_malformed_json(patch_globals, monkeypatch):
+    project = _make_project(patch_globals)
+    assert _run_ingest(project, monkeypatch, result="{not json") == 1
+    assert not list(project["instincts_personal"].glob("*.md"))
+
+
+def test_ingest_rejects_invalid_path_traversal_id(patch_globals, monkeypatch):
+    project = _make_project(patch_globals)
+    assert _run_ingest(project, monkeypatch, result=_analysis([_ingest_instinct(instinct_id="../escape")])) == 1
+    assert not list(project["instincts_personal"].glob("*.md"))
+
+
+def test_ingest_rejects_count_below_3(patch_globals, monkeypatch):
+    project = _make_project(patch_globals)
+    assert _run_ingest(project, monkeypatch, result=_analysis([_ingest_instinct(count=2)])) == 1
+    assert not list(project["instincts_personal"].glob("*.md"))
+
+
+def test_ingest_rejects_unknown_domain(patch_globals, monkeypatch):
+    project = _make_project(patch_globals)
+    assert _run_ingest(project, monkeypatch, result=_analysis([_ingest_instinct(domain="security")])) == 1
+    assert not list(project["instincts_personal"].glob("*.md"))
+
+
+@pytest.mark.parametrize("count, expected", [(3, 0.5), (5, 0.5), (6, 0.7), (10, 0.7), (11, 0.85)])
+def test_ingest_confidence_from_count(patch_globals, monkeypatch, count, expected):
+    project = _make_project(patch_globals, pid=f"proj{count}")
+    assert _run_ingest(project, monkeypatch, result=_analysis([_ingest_instinct(count=count)])) == 0
+    assert _read_personal(project)["confidence"] == expected
+
+
+def test_ingest_updates_higher_confidence(patch_globals, monkeypatch):
+    project = _make_project(patch_globals)
+    assert _run_ingest(project, monkeypatch, result=_analysis([_ingest_instinct(count=3)])) == 0
+    assert _run_ingest(project, monkeypatch, result=_analysis([_ingest_instinct(count=6)])) == 0
+    assert _read_personal(project)["confidence"] == 0.7
+
+
+def test_ingest_does_not_downgrade_confidence(patch_globals, monkeypatch):
+    project = _make_project(patch_globals)
+    assert _run_ingest(project, monkeypatch, result=_analysis([_ingest_instinct(count=11)])) == 0
+    assert _run_ingest(project, monkeypatch, result=_analysis([_ingest_instinct(count=3)])) == 0
+    assert _read_personal(project)["confidence"] == 0.85
+
+
+def test_ingest_updates_equal_confidence_when_last_observed_newer(patch_globals, monkeypatch):
+    project = _make_project(patch_globals)
+    old = _ingest_instinct(last_observed="2026-10-01T12:00:00Z")
+    new = _ingest_instinct(last_observed="2026-10-02T12:00:00Z")
+    new["action"] = "Use the newer observation."
+    assert _run_ingest(project, monkeypatch, result=_analysis([old])) == 0
+    assert _run_ingest(project, monkeypatch, result=_analysis([new])) == 0
+    assert "Use the newer observation." in _read_personal(project)["content"]
+
+
+def test_ingest_dry_run_writes_nothing(patch_globals, monkeypatch):
+    project = _make_project(patch_globals)
+    assert _run_ingest(project, monkeypatch, dry_run=True) == 0
+    assert not list(project["instincts_personal"].glob("*.md"))
+
+
+def test_ingest_dry_run_creates_no_project_storage_lock_or_registry_side_effects(patch_globals, monkeypatch):
+    project = _make_project(patch_globals, pid="dryproj")
+    result = _result_file(project, _analysis())
+    for child in list(project["project_dir"].iterdir()):
+        if child.is_dir():
+            for nested in sorted(child.rglob("*"), reverse=True):
+                nested.rmdir() if nested.is_dir() else nested.unlink()
+            child.rmdir()
+        else:
+            child.unlink()
+    project["project_dir"].rmdir()
+    monkeypatch.setattr(_mod, "detect_project", lambda persist=True: project)
+
+    assert cmd_ingest(SimpleNamespace(result=str(result), dry_run=True)) == 0
+    assert not project["project_dir"].exists()
+    assert not patch_globals["registry_file"].exists()
+
+
+def test_ingest_detects_existing_same_id_in_yaml(patch_globals, monkeypatch):
+    project = _make_project(patch_globals)
+    yaml_path = project["instincts_personal"] / "legacy.yaml"
+    yaml_path.write_text(
+        "---\nid: prefer-tests\ntrigger: old\nconfidence: 0.85\ndomain: testing\n---\n\n"
+        "## Evidence\n- Last observed: 2026-10-02T12:00:00Z\n",
+        encoding="utf-8",
+    )
+    assert _run_ingest(project, monkeypatch, result=_analysis([_ingest_instinct(count=3)])) == 0
+    assert yaml_path.exists()
+    assert not (project["instincts_personal"] / "prefer-tests.md").exists()
+
+
+def test_ingest_safely_migrates_single_yaml_to_canonical_md(patch_globals, monkeypatch):
+    project = _make_project(patch_globals)
+    yaml_path = project["instincts_personal"] / "legacy.yaml"
+    yaml_path.write_text(
+        "---\nid: prefer-tests\ntrigger: old\nconfidence: 0.5\ndomain: testing\n---\n\n"
+        "## Evidence\n- Last observed: 2026-10-01T12:00:00Z\n",
+        encoding="utf-8",
+    )
+    newer = _ingest_instinct(last_observed="2026-10-02T12:00:00Z")
+    newer["action"] = "Canonical migrated update."
+    assert _run_ingest(project, monkeypatch, result=_analysis([newer])) == 0
+    assert not yaml_path.exists()
+    assert "Canonical migrated update." in _read_personal(project)["content"]
+
+
+def test_ingest_ambiguous_bundled_migration_fails_closed(patch_globals, monkeypatch):
+    project = _make_project(patch_globals)
+    bundled = project["instincts_personal"] / "bundle.yaml"
+    bundled.write_text(
+        "---\nid: prefer-tests\ntrigger: old\nconfidence: 0.5\ndomain: testing\n---\n\nold\n"
+        "---\nid: other\ntrigger: old\nconfidence: 0.5\ndomain: testing\n---\n\nother\n",
+        encoding="utf-8",
+    )
+    assert _run_ingest(project, monkeypatch, result=_analysis([_ingest_instinct(count=6)])) == 1
+    assert bundled.exists()
+    assert not (project["instincts_personal"] / "prefer-tests.md").exists()
+
+
+def test_ingest_rejects_invalid_last_observed(patch_globals, monkeypatch):
+    project = _make_project(patch_globals)
+    assert _run_ingest(
+        project,
+        monkeypatch,
+        result=_analysis([_ingest_instinct(last_observed="not-a-date")]),
+    ) == 1
+    assert not list(project["instincts_personal"].glob("*.md"))
+
+
+def test_ingest_rejects_naive_last_observed(patch_globals, monkeypatch):
+    project = _make_project(patch_globals)
+    assert _run_ingest(
+        project,
+        monkeypatch,
+        result=_analysis([_ingest_instinct(last_observed="2026-10-01T12:00:00")]),
+    ) == 1
+    assert not list(project["instincts_personal"].glob("*.md"))
+
+
+def test_ingest_rejects_duplicate_ids(patch_globals, monkeypatch):
+    project = _make_project(patch_globals)
+    first = _ingest_instinct(instinct_id="prefer-tests")
+    second = _ingest_instinct(instinct_id="prefer-tests", count=6)
+    assert _run_ingest(project, monkeypatch, result=_analysis([first, second])) == 1
+    assert not list(project["instincts_personal"].glob("*.md"))
+
+
+def test_ingest_rejects_standalone_frontmatter_delimiter_in_text(patch_globals, monkeypatch):
+    project = _make_project(patch_globals)
+    instinct = _ingest_instinct()
+    instinct["action"] = "Do this\n---\nThen that"
+    assert _run_ingest(project, monkeypatch, result=_analysis([instinct])) == 1
+    assert not list(project["instincts_personal"].glob("*.md"))
+
+
+def test_atomic_write_text_cleans_temp_file_on_replace_failure(patch_globals, monkeypatch):
+    target = patch_globals["root"] / "atomic.txt"
+
+    def fail_replace(src, dst):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(_mod.os, "replace", fail_replace)
+    with pytest.raises(OSError):
+        _mod._atomic_write_text(target, "content")
+
+    leftovers = [path for path in target.parent.iterdir() if path.name.startswith("tmp")]
+    assert leftovers == []
+
+
+def test_ingest_forces_source_scope_and_project_identity_from_detect_project(patch_globals, monkeypatch):
+    project = _make_project(patch_globals, pid="realid", pname="real-name")
+    assert _run_ingest(project, monkeypatch) == 0
+    instinct = _read_personal(project)
+    assert instinct["source"] == "session-observation"
+    assert instinct["scope"] == "project"
+    assert instinct["project_id"] == "realid"
+    assert instinct["project_name"] == "real-name"

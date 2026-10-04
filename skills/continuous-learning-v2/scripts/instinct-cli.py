@@ -128,6 +128,14 @@ GLOBAL_OBSERVATIONS_FILE = HOMUNCULUS_DIR / "observations.jsonl"
 PROMOTE_CONFIDENCE_THRESHOLD = 0.8
 PROMOTE_MIN_PROJECTS = 2
 ALLOWED_INSTINCT_EXTENSIONS = (".yaml", ".yml", ".md")
+INGEST_ALLOWED_DOMAINS = {
+    "code-style",
+    "testing",
+    "git",
+    "debugging",
+    "workflow",
+    "file-patterns",
+}
 
 # Default TTL for pending instincts (days)
 PENDING_TTL_DAYS = 30
@@ -283,7 +291,7 @@ def _main_worktree_root(project_root: str) -> str:
     return project_root
 
 
-def detect_project() -> dict:
+def detect_project(persist: bool = True) -> dict:
     """Detect current project context. Returns dict with id, name, root, project_dir."""
     project_root = None
 
@@ -360,7 +368,7 @@ def detect_project() -> dict:
 
     project_dir = PROJECTS_DIR / project_id
 
-    if not project_dir.exists():
+    if persist and not project_dir.exists():
         legacy_sources = []
         if legacy_hash_source and legacy_hash_source != hash_source:
             legacy_sources.append(legacy_hash_source)
@@ -378,19 +386,20 @@ def detect_project() -> dict:
                     project_dir = legacy_dir
                 break
 
-    # Ensure project directory structure
-    for d in [
-        project_dir / "instincts" / "personal",
-        project_dir / "instincts" / "inherited",
-        project_dir / "observations.archive",
-        project_dir / "evolved" / "skills",
-        project_dir / "evolved" / "commands",
-        project_dir / "evolved" / "agents",
-    ]:
-        d.mkdir(parents=True, exist_ok=True)
+    if persist:
+        # Ensure project directory structure
+        for d in [
+            project_dir / "instincts" / "personal",
+            project_dir / "instincts" / "inherited",
+            project_dir / "observations.archive",
+            project_dir / "evolved" / "skills",
+            project_dir / "evolved" / "commands",
+            project_dir / "evolved" / "agents",
+        ]:
+            d.mkdir(parents=True, exist_ok=True)
 
-    # Update registry
-    _update_registry(project_id, project_name, project_root, remote_url)
+        # Update registry
+        _update_registry(project_id, project_name, project_root, remote_url)
 
     return {
         "id": project_id,
@@ -416,6 +425,23 @@ def _registry_lock():
     """
     REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
     lock_path = REGISTRY_FILE.parent / f".{REGISTRY_FILE.name}.lock"
+    lock_fd = None
+    try:
+        if _HAS_FCNTL:
+            lock_fd = open(lock_path, "w")
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        if lock_fd is not None:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            lock_fd.close()
+
+
+@contextmanager
+def _project_lock(project: dict):
+    """Serialize project-scoped instinct writes where fcntl is available."""
+    project["project_dir"].mkdir(parents=True, exist_ok=True)
+    lock_path = project["project_dir"] / ".instincts.lock"
     lock_fd = None
     try:
         if _HAS_FCNTL:
@@ -1064,6 +1090,279 @@ def cmd_import(args) -> int:
     print(f"   Added: {len(to_add)}")
     print(f"   Updated: {len(to_update)}")
     print(f"   Saved to: {output_file}")
+
+    return 0
+
+
+def _ingest_confidence(count: int) -> float:
+    if count < 3:
+        raise ValueError("evidence.count must be >= 3")
+    if count <= 5:
+        return 0.5
+    if count <= 10:
+        return 0.7
+    return 0.85
+
+
+def _human_title(instinct_id: str) -> str:
+    return instinct_id.replace("_", "-").replace(".", "-").replace("-", " ").title()
+
+
+def _parse_observed(value: str):
+    if not isinstance(value, str) or not value:
+        return None
+    normalized = value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None and parsed.utcoffset() is not None else None
+
+
+def _is_newer_observation(new_value: str, old_value: str) -> bool:
+    new_dt = _parse_observed(new_value)
+    old_dt = _parse_observed(old_value)
+    if new_dt and old_dt:
+        return new_dt > old_dt
+    return False
+
+
+def _extract_last_observed(instinct: dict) -> str:
+    match = re.search(r"^- Last observed:\s*(.+)$", instinct.get("content", ""), re.MULTILINE)
+    return match.group(1).strip() if match else ""
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+            tmp.write(content)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+        raise
+
+
+def _validate_model_text(value: object, field: str, *, max_length: int, single_line: bool = False) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field} must be a non-empty string")
+    if len(value) > max_length:
+        raise ValueError(f"{field} is too long")
+    if any((ord(ch) < 32 and ch not in "\n\r\t") or ord(ch) == 127 for ch in value):
+        raise ValueError(f"{field} contains control characters")
+    if single_line and any(ch in value for ch in "\r\n"):
+        raise ValueError(f"{field} must be single-line")
+    if any(line.strip() == "---" for line in value.splitlines()):
+        raise ValueError(f"{field} contains unsupported frontmatter delimiter")
+    return value
+
+
+def _validate_observed_timestamp(value: object) -> str:
+    observed = _validate_model_text(value, "evidence.last_observed", max_length=64, single_line=True)
+    if _parse_observed(observed) is None:
+        raise ValueError("evidence.last_observed must be an ISO-8601 timestamp with timezone")
+    return observed
+
+
+def _validate_ingest_payload(raw: str) -> list[dict]:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"malformed JSON: {exc.msg}") from exc
+
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be a JSON object")
+    if payload.get("status") != "analysis_complete":
+        raise ValueError("status must be analysis_complete")
+    instincts = payload.get("instincts")
+    if not isinstance(instincts, list):
+        raise ValueError("instincts must be an array")
+
+    validated = []
+    seen_ids = set()
+    for index, instinct in enumerate(instincts):
+        if not isinstance(instinct, dict):
+            raise ValueError(f"instinct[{index}] must be an object")
+        missing = [key for key in ("id", "trigger", "domain", "action", "evidence") if key not in instinct]
+        if missing:
+            raise ValueError(f"instinct[{index}] missing required fields: {', '.join(missing)}")
+        instinct_id = instinct["id"]
+        if not isinstance(instinct_id, str) or not _validate_instinct_id(instinct_id):
+            raise ValueError(f"invalid instinct id: {instinct_id!r}")
+        if instinct_id in seen_ids:
+            raise ValueError(f"duplicate instinct id: {instinct_id}")
+        seen_ids.add(instinct_id)
+        domain = instinct["domain"]
+        if domain not in INGEST_ALLOWED_DOMAINS:
+            raise ValueError(f"unknown domain: {domain!r}")
+        evidence = instinct["evidence"]
+        if not isinstance(evidence, dict):
+            raise ValueError(f"instinct[{index}].evidence must be an object")
+        missing_evidence = [
+            key for key in ("count", "pattern", "last_observed", "session_ids")
+            if key not in evidence
+        ]
+        if missing_evidence:
+            raise ValueError(f"instinct[{index}].evidence missing required fields: {', '.join(missing_evidence)}")
+        count = evidence["count"]
+        if not isinstance(count, int) or isinstance(count, bool):
+            raise ValueError("evidence.count must be an integer")
+        confidence = _ingest_confidence(count)
+        session_ids = evidence["session_ids"]
+        if not isinstance(session_ids, list):
+            raise ValueError("evidence.session_ids must be an array of strings")
+        session_ids = [
+            _validate_model_text(item, "evidence.session_ids[]", max_length=128, single_line=True)
+            for item in session_ids
+        ]
+        trigger = _validate_model_text(instinct["trigger"], "trigger", max_length=500, single_line=True)
+        action = _validate_model_text(instinct["action"], "action", max_length=8000)
+        pattern = _validate_model_text(evidence["pattern"], "evidence.pattern", max_length=2000)
+        last_observed = _validate_observed_timestamp(evidence["last_observed"])
+        validated.append({
+            "id": instinct_id,
+            "trigger": trigger,
+            "domain": domain,
+            "action": action,
+            "confidence": confidence,
+            "evidence": {
+                "count": count,
+                "pattern": pattern,
+                "last_observed": last_observed,
+                "session_ids": session_ids,
+            },
+        })
+    return validated
+
+
+def _render_ingested_instinct(instinct: dict, project: dict) -> str:
+    evidence = instinct["evidence"]
+    sessions = ", ".join(evidence["session_ids"])
+    return (
+        "---\n"
+        f"id: {instinct['id']}\n"
+        f"trigger: {_yaml_quote(instinct['trigger'])}\n"
+        f"confidence: {instinct['confidence']}\n"
+        f"domain: {instinct['domain']}\n"
+        "source: session-observation\n"
+        "scope: project\n"
+        f"project_id: {project['id']}\n"
+        f"project_name: {_yaml_quote(project['name'])}\n"
+        "---\n\n"
+        f"# {_human_title(instinct['id'])}\n\n"
+        "## Action\n"
+        f"{instinct['action']}\n\n"
+        "## Evidence\n"
+        f"- Observed {evidence['count']} times\n"
+        f"- Sessions: {sessions}\n"
+        f"- Pattern: {evidence['pattern']}\n"
+        f"- Last observed: {evidence['last_observed']}\n"
+    )
+
+
+def _find_personal_ingest_match(project: dict, instinct_id: str) -> tuple[Path, dict] | None:
+    matches = []
+    directory = project["instincts_personal"]
+    if not directory.exists():
+        return None
+    for path in sorted(directory.iterdir()):
+        if not path.is_file() or path.suffix.lower() not in {".md", ".yaml", ".yml"}:
+            continue
+        parsed = parse_instinct_file(path.read_text(encoding="utf-8"))
+        for item in parsed:
+            if item.get("id") == instinct_id:
+                matches.append((path, item, len(parsed)))
+    if len(matches) > 1:
+        raise ValueError(f"ambiguous existing personal instinct id: {instinct_id}")
+    if not matches:
+        return None
+    path, item, parsed_count = matches[0]
+    canonical = directory / f"{instinct_id}.md"
+    if path != canonical and parsed_count != 1:
+        raise ValueError(f"cannot safely migrate bundled personal instinct id: {instinct_id}")
+    return path, item
+
+
+def _ingest_decisions(instincts: list[dict], project: dict) -> list[tuple[str, dict, Path, Path | None]]:
+    decisions = []
+    for instinct in instincts:
+        path = project["instincts_personal"] / f"{instinct['id']}.md"
+        match = _find_personal_ingest_match(project, instinct["id"])
+        if not match:
+            decisions.append(("create", instinct, path, None))
+            continue
+        source_path, current = match
+        current_conf = current.get("confidence", 0)
+        new_conf = instinct["confidence"]
+        if new_conf > current_conf:
+            decisions.append(("update", instinct, path, source_path if source_path != path else None))
+        elif new_conf == current_conf and _is_newer_observation(
+            instinct["evidence"]["last_observed"], _extract_last_observed(current)
+        ):
+            decisions.append(("update", instinct, path, source_path if source_path != path else None))
+        else:
+            decisions.append(("skip", instinct, path, None))
+    return decisions
+
+
+def cmd_ingest(args) -> int:
+    """Ingest structured observer-analysis JSON into project personal instincts."""
+    project = detect_project(persist=not args.dry_run)
+    if project["id"] == "global":
+        print("Error: refusing to ingest without a detected project.", file=sys.stderr)
+        return 1
+
+    try:
+        result_path = _validate_file_path(args.result, must_exist=True)
+        if not result_path.is_file():
+            raise ValueError(f"Path is not a file: {result_path}")
+        instincts = _validate_ingest_payload(result_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.dry_run:
+        try:
+            decisions = _ingest_decisions(instincts, project)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        creates = sum(1 for action, _, _, _ in decisions if action == "create")
+        updates = sum(1 for action, _, _, _ in decisions if action == "update")
+        skips = sum(1 for action, _, _, _ in decisions if action == "skip")
+        print(f"Ingest decisions: create={creates}, update={updates}, skip={skips}")
+        for action, instinct, _, _ in decisions:
+            print(f"  {action}: {instinct['id']} (confidence: {instinct['confidence']:.2f})")
+        print("[DRY RUN] No changes made.")
+        return 0
+
+    with _project_lock(project):
+        try:
+            decisions = _ingest_decisions(instincts, project)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        creates = sum(1 for action, _, _, _ in decisions if action == "create")
+        updates = sum(1 for action, _, _, _ in decisions if action == "update")
+        skips = sum(1 for action, _, _, _ in decisions if action == "skip")
+
+        print(f"Ingest decisions: create={creates}, update={updates}, skip={skips}")
+        for action, instinct, _, _ in decisions:
+            print(f"  {action}: {instinct['id']} (confidence: {instinct['confidence']:.2f})")
+
+        for action, instinct, path, stale_path in decisions:
+            if action in {"create", "update"}:
+                _atomic_write_text(path, _render_ingested_instinct(instinct, project))
+                if stale_path is not None:
+                    stale_path.unlink()
 
     return 0
 
@@ -2222,6 +2521,11 @@ def main() -> int:
     import_parser.add_argument('--scope', choices=['project', 'global'], default='project',
                                help='Import scope (default: project)')
 
+    # Ingest observer analysis
+    ingest_parser = subparsers.add_parser('ingest', help='Ingest observer-analysis JSON')
+    ingest_parser.add_argument('result', help='Structured observer-analysis JSON')
+    ingest_parser.add_argument('--dry-run', action='store_true', help='Validate and preview without writing')
+
     # Export
     export_parser = subparsers.add_parser('export', help='Export instincts')
     export_parser.add_argument('--output', '-o', help='Output file')
@@ -2271,6 +2575,8 @@ def main() -> int:
         return cmd_status(args)
     elif args.command == 'import':
         return cmd_import(args)
+    elif args.command == 'ingest':
+        return cmd_ingest(args)
     elif args.command == 'export':
         return cmd_export(args)
     elif args.command == 'evolve':
