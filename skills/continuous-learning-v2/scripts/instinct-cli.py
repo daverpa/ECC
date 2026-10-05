@@ -135,6 +135,8 @@ INGEST_ALLOWED_DOMAINS = {
     "debugging",
     "workflow",
     "file-patterns",
+    "security",
+    "general-best-practices",
 }
 
 # Default TTL for pending instincts (days)

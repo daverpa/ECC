@@ -1587,9 +1587,24 @@ def test_ingest_rejects_count_below_3(patch_globals, monkeypatch):
     assert not list(project["instincts_personal"].glob("*.md"))
 
 
+@pytest.mark.parametrize("domain", ["security", "general-best-practices"])
+def test_ingest_accepts_clv2_domains(patch_globals, monkeypatch, domain):
+    project = _make_project(patch_globals)
+    assert _run_ingest(
+        project,
+        monkeypatch,
+        result=_analysis([_ingest_instinct(domain=domain)]),
+    ) == 0
+    assert _read_personal(project)["domain"] == domain
+
+
 def test_ingest_rejects_unknown_domain(patch_globals, monkeypatch):
     project = _make_project(patch_globals)
-    assert _run_ingest(project, monkeypatch, result=_analysis([_ingest_instinct(domain="security")])) == 1
+    assert _run_ingest(
+        project,
+        monkeypatch,
+        result=_analysis([_ingest_instinct(domain="unknown-domain")]),
+    ) == 1
     assert not list(project["instincts_personal"].glob("*.md"))
 
 
