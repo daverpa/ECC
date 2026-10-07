@@ -124,8 +124,9 @@ function getSessionLeaseDir(context) {
   return path.join(context.projectDir, '.observer-sessions');
 }
 
-function resolveSessionId(rawSessionId = process.env.CLAUDE_SESSION_ID) {
-  return sanitizeSessionId(rawSessionId || '') || '';
+function resolveSessionId(rawSessionId) {
+  const sessionId = rawSessionId === undefined ? process.env.CLAUDE_SESSION_ID : rawSessionId;
+  return sanitizeSessionId(sessionId || '') || '';
 }
 
 function getSessionLeaseFile(context, rawSessionId = process.env.CLAUDE_SESSION_ID) {

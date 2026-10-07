@@ -20,10 +20,23 @@ function log(message) {
 
 function run(rawInput) {
   const output = rawInput || '';
-  const sessionId = resolveSessionId();
+  let payloadSessionId;
+
+  if (rawInput) {
+    try {
+      const payload = JSON.parse(rawInput);
+      if (typeof payload.session_id === 'string') {
+        payloadSessionId = payload.session_id;
+      }
+    } catch {
+      // Preserve environment fallback behavior for malformed hook payloads.
+    }
+  }
+
+  const sessionId = resolveSessionId(payloadSessionId);
 
   if (!sessionId) {
-    log('No CLAUDE_SESSION_ID available; skipping observer cleanup');
+    log('No session ID available; skipping observer cleanup');
     return output;
   }
 

@@ -8,6 +8,7 @@ const {
   getHomunculusDir,
   normalizeRemoteUrl,
   resolveProjectContext,
+  resolveSessionId,
 } = require('../../scripts/lib/observer-sessions');
 
 let passed = 0;
@@ -103,6 +104,37 @@ test('normalizeRemoteUrl collapses common network remote variants', () => {
 test('normalizeRemoteUrl preserves local path case', () => {
   assert.strictEqual(normalizeRemoteUrl('/tmp/Repos/MyProject'), '/tmp/Repos/MyProject');
   assert.strictEqual(normalizeRemoteUrl('file:///tmp/Repos/MyProject.git'), '/tmp/Repos/MyProject');
+});
+
+test('resolveSessionId returns an explicit session ID', () => {
+  withEnv({ CLAUDE_SESSION_ID: undefined }, () => {
+    assert.strictEqual(resolveSessionId('codex-session-123'), 'codex-session-123');
+  });
+});
+
+test('resolveSessionId prefers an explicit session ID over CLAUDE_SESSION_ID', () => {
+  withEnv({ CLAUDE_SESSION_ID: 'claude-session-123' }, () => {
+    assert.strictEqual(resolveSessionId('codex-session-123'), 'codex-session-123');
+  });
+});
+
+test('resolveSessionId falls back to CLAUDE_SESSION_ID', () => {
+  withEnv({ CLAUDE_SESSION_ID: 'claude-session-123' }, () => {
+    assert.strictEqual(resolveSessionId(), 'claude-session-123');
+  });
+});
+
+test('resolveSessionId preserves no-ID behavior when explicit and CLAUDE_SESSION_ID are missing', () => {
+  withEnv({ CLAUDE_SESSION_ID: undefined }, () => {
+    assert.strictEqual(resolveSessionId(), '');
+  });
+});
+
+test('resolveSessionId sanitizes invalid explicit session IDs like existing session IDs', () => {
+  withEnv({ CLAUDE_SESSION_ID: 'claude-session-123' }, () => {
+    assert.strictEqual(resolveSessionId('../etc/passwd'), 'etc-passwd');
+    assert.strictEqual(resolveSessionId('...'), '');
+  });
 });
 
 test('resolveProjectContext gives SSH and HTTPS clones the same project id', () => {

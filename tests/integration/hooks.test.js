@@ -236,6 +236,25 @@ function getTestHomunculusEnv(testDir) {
   };
 }
 
+function readOnlyObserverLease(homunculusDir) {
+  const projectsDir = path.join(homunculusDir, 'projects');
+  const projectEntries = fs.existsSync(projectsDir) ? fs.readdirSync(projectsDir) : [];
+  assert.ok(projectEntries.length > 0, 'SessionStart should create a homunculus project directory');
+  const leaseDir = path.join(projectsDir, projectEntries[0], '.observer-sessions');
+  const leaseFiles = fs.existsSync(leaseDir) ? fs.readdirSync(leaseDir).filter(name => name.endsWith('.json')) : [];
+  assert.strictEqual(leaseFiles.length, 1, `Expected one observer lease file, found ${leaseFiles.length}`);
+  return JSON.parse(fs.readFileSync(path.join(leaseDir, leaseFiles[0]), 'utf8'));
+}
+
+function readObserverLeases(homunculusDir) {
+  const projectsDir = path.join(homunculusDir, 'projects');
+  const projectEntries = fs.existsSync(projectsDir) ? fs.readdirSync(projectsDir) : [];
+  assert.ok(projectEntries.length > 0, 'Expected a homunculus project directory');
+  const leaseDir = path.join(projectsDir, projectEntries[0], '.observer-sessions');
+  const leaseFiles = fs.existsSync(leaseDir) ? fs.readdirSync(leaseDir).filter(name => name.endsWith('.json')) : [];
+  return leaseFiles.map(file => JSON.parse(fs.readFileSync(path.join(leaseDir, file), 'utf8')));
+}
+
 function writeInstinctFile(filePath, entries) {
   const body = entries.map(entry => `---
 id: ${entry.id}
@@ -403,12 +422,126 @@ async function runTests() {
       );
 
       assert.strictEqual(result.code, 0, 'SessionStart should exit 0');
-      const projectsDir = path.join(homunculusEnv.homunculusDir, 'projects');
-      const projectEntries = fs.existsSync(projectsDir) ? fs.readdirSync(projectsDir) : [];
-      assert.ok(projectEntries.length > 0, 'SessionStart should create a homunculus project directory');
-      const leaseDir = path.join(projectsDir, projectEntries[0], '.observer-sessions');
-      const leaseFiles = fs.existsSync(leaseDir) ? fs.readdirSync(leaseDir).filter(name => name.endsWith('.json')) : [];
-      assert.ok(leaseFiles.length === 1, `Expected one observer lease file, found ${leaseFiles.length}`);
+      assert.strictEqual(readOnlyObserverLease(homunculusEnv.homunculusDir).sessionId, sessionId);
+    } finally {
+      cleanupTestDir(testDir);
+    }
+  })) passed++; else failed++;
+
+  if (await asyncTest('session-start payload session_id creates an observer lease with that ID', async () => {
+    const testDir = createTestDir();
+    const projectDir = path.join(testDir, 'project');
+    fs.mkdirSync(projectDir, { recursive: true });
+
+    try {
+      const sessionId = `payload-session-${Date.now()}`;
+      const homunculusEnv = getTestHomunculusEnv(testDir);
+      const result = await runHookWithInput(
+        path.join(scriptsDir, 'session-start.js'),
+        {
+          session_id: sessionId,
+          hook_event_name: 'SessionStart',
+          source: 'startup'
+        },
+        {
+          HOME: homunculusEnv.HOME,
+          XDG_DATA_HOME: homunculusEnv.XDG_DATA_HOME,
+          CLAUDE_PROJECT_DIR: projectDir
+        }
+      );
+
+      assert.strictEqual(result.code, 0, 'SessionStart should exit 0');
+      assert.strictEqual(readOnlyObserverLease(homunculusEnv.homunculusDir).sessionId, sessionId);
+    } finally {
+      cleanupTestDir(testDir);
+    }
+  })) passed++; else failed++;
+
+  if (await asyncTest('session-start payload session_id takes precedence over CLAUDE_SESSION_ID', async () => {
+    const testDir = createTestDir();
+    const projectDir = path.join(testDir, 'project');
+    fs.mkdirSync(projectDir, { recursive: true });
+
+    try {
+      const payloadSessionId = `payload-session-${Date.now()}`;
+      const envSessionId = `env-session-${Date.now()}`;
+      const homunculusEnv = getTestHomunculusEnv(testDir);
+      const result = await runHookWithInput(
+        path.join(scriptsDir, 'session-start.js'),
+        {
+          session_id: payloadSessionId,
+          hook_event_name: 'SessionStart',
+          source: 'startup'
+        },
+        {
+          HOME: homunculusEnv.HOME,
+          XDG_DATA_HOME: homunculusEnv.XDG_DATA_HOME,
+          CLAUDE_PROJECT_DIR: projectDir,
+          CLAUDE_SESSION_ID: envSessionId
+        }
+      );
+
+      assert.strictEqual(result.code, 0, 'SessionStart should exit 0');
+      assert.strictEqual(readOnlyObserverLease(homunculusEnv.homunculusDir).sessionId, payloadSessionId);
+    } finally {
+      cleanupTestDir(testDir);
+    }
+  })) passed++; else failed++;
+
+  if (await asyncTest('session-start without payload session_id preserves CLAUDE_SESSION_ID lease behavior', async () => {
+    const testDir = createTestDir();
+    const projectDir = path.join(testDir, 'project');
+    fs.mkdirSync(projectDir, { recursive: true });
+
+    try {
+      const sessionId = `env-session-${Date.now()}`;
+      const homunculusEnv = getTestHomunculusEnv(testDir);
+      const result = await runHookWithInput(
+        path.join(scriptsDir, 'session-start.js'),
+        {
+          hook_event_name: 'SessionStart',
+          source: 'startup'
+        },
+        {
+          HOME: homunculusEnv.HOME,
+          XDG_DATA_HOME: homunculusEnv.XDG_DATA_HOME,
+          CLAUDE_PROJECT_DIR: projectDir,
+          CLAUDE_SESSION_ID: sessionId
+        }
+      );
+
+      assert.strictEqual(result.code, 0, 'SessionStart should exit 0');
+      assert.strictEqual(readOnlyObserverLease(homunculusEnv.homunculusDir).sessionId, sessionId);
+    } finally {
+      cleanupTestDir(testDir);
+    }
+  })) passed++; else failed++;
+
+  if (await asyncTest('session-start transcript_path null does not block payload session lease creation', async () => {
+    const testDir = createTestDir();
+    const projectDir = path.join(testDir, 'project');
+    fs.mkdirSync(projectDir, { recursive: true });
+
+    try {
+      const sessionId = `payload-session-${Date.now()}`;
+      const homunculusEnv = getTestHomunculusEnv(testDir);
+      const result = await runHookWithInput(
+        path.join(scriptsDir, 'session-start.js'),
+        {
+          session_id: sessionId,
+          transcript_path: null,
+          hook_event_name: 'SessionStart',
+          source: 'startup'
+        },
+        {
+          HOME: homunculusEnv.HOME,
+          XDG_DATA_HOME: homunculusEnv.XDG_DATA_HOME,
+          CLAUDE_PROJECT_DIR: projectDir
+        }
+      );
+
+      assert.strictEqual(result.code, 0, 'SessionStart should exit 0');
+      assert.strictEqual(readOnlyObserverLease(homunculusEnv.homunculusDir).sessionId, sessionId);
     } finally {
       cleanupTestDir(testDir);
     }
@@ -541,6 +674,230 @@ async function runTests() {
       sleeper.kill();
       cleanupTestDir(testDir);
     }
+  })) passed++; else failed++;
+
+  if (await asyncTest('session-end-marker payload session_id removes that lease', async () => {
+    const testDir = createTestDir();
+    const projectDir = path.join(testDir, 'project');
+    fs.mkdirSync(projectDir, { recursive: true });
+
+    try {
+      const sessionId = `payload-session-${Date.now()}`;
+      const homunculusEnv = getTestHomunculusEnv(testDir);
+      await runHookWithInput(
+        path.join(scriptsDir, 'session-start.js'),
+        { session_id: sessionId, hook_event_name: 'SessionStart' },
+        {
+          HOME: homunculusEnv.HOME,
+          XDG_DATA_HOME: homunculusEnv.XDG_DATA_HOME,
+          CLAUDE_PROJECT_DIR: projectDir
+        }
+      );
+
+      const result = await runHookWithInput(
+        path.join(scriptsDir, 'session-end-marker.js'),
+        { session_id: sessionId, hook_event_name: 'SessionEnd' },
+        {
+          HOME: homunculusEnv.HOME,
+          XDG_DATA_HOME: homunculusEnv.XDG_DATA_HOME,
+          CLAUDE_PROJECT_DIR: projectDir
+        }
+      );
+
+      assert.strictEqual(result.code, 0, 'SessionEnd marker should exit 0');
+      assert.deepStrictEqual(readObserverLeases(homunculusEnv.homunculusDir), []);
+    } finally {
+      cleanupTestDir(testDir);
+    }
+  })) passed++; else failed++;
+
+  if (await asyncTest('session-end-marker payload session_id takes precedence over CLAUDE_SESSION_ID', async () => {
+    const testDir = createTestDir();
+    const projectDir = path.join(testDir, 'project');
+    fs.mkdirSync(projectDir, { recursive: true });
+
+    try {
+      const payloadSessionId = `payload-session-${Date.now()}`;
+      const envSessionId = `env-session-${Date.now()}`;
+      const homunculusEnv = getTestHomunculusEnv(testDir);
+      await runHookWithInput(
+        path.join(scriptsDir, 'session-start.js'),
+        { session_id: payloadSessionId, hook_event_name: 'SessionStart' },
+        {
+          HOME: homunculusEnv.HOME,
+          XDG_DATA_HOME: homunculusEnv.XDG_DATA_HOME,
+          CLAUDE_PROJECT_DIR: projectDir
+        }
+      );
+      await runHookWithInput(
+        path.join(scriptsDir, 'session-start.js'),
+        {},
+        {
+          HOME: homunculusEnv.HOME,
+          XDG_DATA_HOME: homunculusEnv.XDG_DATA_HOME,
+          CLAUDE_PROJECT_DIR: projectDir,
+          CLAUDE_SESSION_ID: envSessionId
+        }
+      );
+
+      const result = await runHookWithInput(
+        path.join(scriptsDir, 'session-end-marker.js'),
+        { session_id: payloadSessionId, hook_event_name: 'SessionEnd' },
+        {
+          HOME: homunculusEnv.HOME,
+          XDG_DATA_HOME: homunculusEnv.XDG_DATA_HOME,
+          CLAUDE_PROJECT_DIR: projectDir,
+          CLAUDE_SESSION_ID: envSessionId
+        }
+      );
+
+      assert.strictEqual(result.code, 0, 'SessionEnd marker should exit 0');
+      assert.deepStrictEqual(readObserverLeases(homunculusEnv.homunculusDir).map(lease => lease.sessionId), [envSessionId]);
+    } finally {
+      cleanupTestDir(testDir);
+    }
+  })) passed++; else failed++;
+
+  if (await asyncTest('session-end-marker without payload session_id preserves CLAUDE_SESSION_ID fallback', async () => {
+    const testDir = createTestDir();
+    const projectDir = path.join(testDir, 'project');
+    fs.mkdirSync(projectDir, { recursive: true });
+
+    try {
+      const sessionId = `env-session-${Date.now()}`;
+      const homunculusEnv = getTestHomunculusEnv(testDir);
+      await runHookWithInput(
+        path.join(scriptsDir, 'session-start.js'),
+        {},
+        {
+          HOME: homunculusEnv.HOME,
+          XDG_DATA_HOME: homunculusEnv.XDG_DATA_HOME,
+          CLAUDE_PROJECT_DIR: projectDir,
+          CLAUDE_SESSION_ID: sessionId
+        }
+      );
+
+      const result = await runHookWithInput(
+        path.join(scriptsDir, 'session-end-marker.js'),
+        { hook_event_name: 'SessionEnd' },
+        {
+          HOME: homunculusEnv.HOME,
+          XDG_DATA_HOME: homunculusEnv.XDG_DATA_HOME,
+          CLAUDE_PROJECT_DIR: projectDir,
+          CLAUDE_SESSION_ID: sessionId
+        }
+      );
+
+      assert.strictEqual(result.code, 0, 'SessionEnd marker should exit 0');
+      assert.deepStrictEqual(readObserverLeases(homunculusEnv.homunculusDir), []);
+    } finally {
+      cleanupTestDir(testDir);
+    }
+  })) passed++; else failed++;
+
+  if (await asyncTest('session-end-marker transcript_path null does not interfere with payload session_id', async () => {
+    const testDir = createTestDir();
+    const projectDir = path.join(testDir, 'project');
+    fs.mkdirSync(projectDir, { recursive: true });
+
+    try {
+      const sessionId = `payload-session-${Date.now()}`;
+      const homunculusEnv = getTestHomunculusEnv(testDir);
+      await runHookWithInput(
+        path.join(scriptsDir, 'session-start.js'),
+        { session_id: sessionId, hook_event_name: 'SessionStart' },
+        {
+          HOME: homunculusEnv.HOME,
+          XDG_DATA_HOME: homunculusEnv.XDG_DATA_HOME,
+          CLAUDE_PROJECT_DIR: projectDir
+        }
+      );
+
+      const result = await runHookWithInput(
+        path.join(scriptsDir, 'session-end-marker.js'),
+        {
+          session_id: sessionId,
+          transcript_path: null,
+          cwd: projectDir,
+          hook_event_name: 'SessionEnd',
+          reason: 'other'
+        },
+        {
+          HOME: homunculusEnv.HOME,
+          XDG_DATA_HOME: homunculusEnv.XDG_DATA_HOME,
+          CLAUDE_PROJECT_DIR: projectDir
+        }
+      );
+
+      assert.strictEqual(result.code, 0, 'SessionEnd marker should exit 0');
+      assert.deepStrictEqual(readObserverLeases(homunculusEnv.homunculusDir), []);
+    } finally {
+      cleanupTestDir(testDir);
+    }
+  })) passed++; else failed++;
+
+  if (await asyncTest('session-end-marker malformed JSON preserves CLAUDE_SESSION_ID fallback', async () => {
+    const testDir = createTestDir();
+    const projectDir = path.join(testDir, 'project');
+    fs.mkdirSync(projectDir, { recursive: true });
+
+    try {
+      const sessionId = `env-session-${Date.now()}`;
+      const homunculusEnv = getTestHomunculusEnv(testDir);
+      await runHookWithInput(
+        path.join(scriptsDir, 'session-start.js'),
+        {},
+        {
+          HOME: homunculusEnv.HOME,
+          XDG_DATA_HOME: homunculusEnv.XDG_DATA_HOME,
+          CLAUDE_PROJECT_DIR: projectDir,
+          CLAUDE_SESSION_ID: sessionId
+        }
+      );
+
+      const proc = spawn('node', [path.join(scriptsDir, 'session-end-marker.js')], {
+        env: {
+          ...process.env,
+          HOME: homunculusEnv.HOME,
+          XDG_DATA_HOME: homunculusEnv.XDG_DATA_HOME,
+          CLAUDE_PROJECT_DIR: projectDir,
+          CLAUDE_SESSION_ID: sessionId
+        },
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+
+      let stdout = '';
+      proc.stdout.on('data', data => stdout += data);
+      proc.stdin.write('{ invalid json }');
+      proc.stdin.end();
+      const code = await new Promise(resolve => proc.on('close', resolve));
+
+      assert.strictEqual(code, 0, 'SessionEnd marker should exit 0');
+      assert.strictEqual(stdout, '{ invalid json }', 'SessionEnd marker should pass malformed stdin through unchanged');
+      assert.deepStrictEqual(readObserverLeases(homunculusEnv.homunculusDir), []);
+    } finally {
+      cleanupTestDir(testDir);
+    }
+  })) passed++; else failed++;
+
+  if (await asyncTest('session-end-marker CLI passes stdin through unchanged', async () => {
+    const rawInput = JSON.stringify({
+      session_id: `payload-session-${Date.now()}`,
+      transcript_path: null,
+      hook_event_name: 'SessionEnd'
+    });
+    const proc = spawn('node', [path.join(scriptsDir, 'session-end-marker.js')], {
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+
+    let stdout = '';
+    proc.stdout.on('data', data => stdout += data);
+    proc.stdin.write(rawInput);
+    proc.stdin.end();
+    const code = await new Promise(resolve => proc.on('close', resolve));
+
+    assert.strictEqual(code, 0, 'SessionEnd marker should exit 0');
+    assert.strictEqual(stdout, rawInput, 'SessionEnd marker should pass stdin through unchanged');
   })) passed++; else failed++;
 
   if (await asyncTest('dev server hook transforms yarn dev to tmux session', async () => {

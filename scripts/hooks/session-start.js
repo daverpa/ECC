@@ -169,18 +169,19 @@ function getMaxInjectedInstincts() {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_INJECTED_INSTINCTS;
 }
 
-function getSessionStartMode(rawInput) {
+function parseSessionStartPayload(rawInput) {
   const input = String(rawInput || '');
   if (!input.trim()) return null;
 
-  let payload;
   try {
-    payload = JSON.parse(input);
+    return JSON.parse(input);
   } catch {
     log(`[SessionStart] Invalid stdin payload; skipping previous session summary injection. Length: ${input.length}`);
-    return SESSION_START_MODE_INVALID;
+    return null;
   }
+}
 
+function getSessionStartModeFromPayload(payload) {
   const supportedModes = new Set(['startup', 'resume', 'clear', 'compact']);
   const hookName = typeof payload.hookName === 'string' ? payload.hookName.trim() : '';
   if (hookName.startsWith('SessionStart:')) {
@@ -641,6 +642,8 @@ function summarizeLearnedSkills(learnedDir, learnedSkillFiles = collectLearnedSk
 }
 
 async function main() {
+  const stdinPayload = fs.readFileSync(0, 'utf8');
+  const hookPayload = parseSessionStartPayload(stdinPayload);
   const sessionsDir = getSessionsDir();
   const sessionSearchDirs = getSessionSearchDirs();
   const learnedDir = getLearnedSkillsDir();
@@ -649,7 +652,9 @@ async function main() {
   const maxContextChars = getSessionStartMaxContextChars();
   const explicitContextDisabled = isSessionStartContextDisabled();
   const shouldInjectContext = !explicitContextDisabled && maxContextChars !== 0;
-  const sessionStartMode = getSessionStartMode(fs.readFileSync(0, 'utf8'));
+  const sessionStartMode = hookPayload
+    ? getSessionStartModeFromPayload(hookPayload)
+    : (stdinPayload.trim() ? SESSION_START_MODE_INVALID : null);
 
   // Ensure directories exist
   ensureDir(sessionsDir);
@@ -665,7 +670,8 @@ async function main() {
     }
   }
 
-  const observerSessionId = resolveSessionId();
+  const explicitSessionId = typeof hookPayload?.session_id === 'string' ? hookPayload.session_id : undefined;
+  const observerSessionId = resolveSessionId(explicitSessionId);
   if (observerSessionId) {
     writeSessionLease(observerContext, observerSessionId, {
       hook: 'SessionStart',
