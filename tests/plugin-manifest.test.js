@@ -367,14 +367,21 @@ test('codex lifecycle hook bundle contains only Codex 0.146-supported schema', (
   ]);
   assert.deepStrictEqual(
     Object.keys(config.hooks || {}),
-    ['SessionStart'],
-    'Only the verified, non-blocking SessionStart hook ships natively; Claude hook profiles are not Codex hook profiles'
+    ['SessionStart', 'PreToolUse', 'PostToolUse', 'SessionEnd'],
+    'Codex native hooks must expose only the verified lifecycle and tool observation boundary'
   );
-  assert.deepStrictEqual(
-    config.hooks.SessionStart.map(group => group.id),
-    ['session:start'],
-    'Do not ship Claude handlers that surface hook failures in Codex'
-  );
+
+  const expectedIdsByEvent = {
+    SessionStart: ['session:start'],
+    PreToolUse: ['pre:observe:continuous-learning'],
+    PostToolUse: ['post:observe:continuous-learning'],
+    SessionEnd: ['session:end:marker']
+  };
+  for (const [event, expectedIds] of Object.entries(expectedIdsByEvent)) {
+    assert.deepStrictEqual(config.hooks[event].map(group => group.id), expectedIds, `Unexpected Codex hook IDs for ${event}`);
+  }
+  assert.ok(!Object.prototype.hasOwnProperty.call(config.hooks, 'Stop'), 'Codex native bundle must not add Stop');
+  assert.ok(!Object.prototype.hasOwnProperty.call(config.hooks, 'PostToolUseFailure'), 'Codex native bundle must not add PostToolUseFailure');
 
   for (const [event, groups] of Object.entries(config.hooks || {})) {
     assert.ok(supportedEvents.has(event), `Unsupported Codex hook event: ${event}`);
@@ -408,6 +415,25 @@ test('codex lifecycle hook bundle contains only Codex 0.146-supported schema', (
     }))
   };
   assert.deepStrictEqual(config.hooks.SessionStart[0], expectedSessionStart, 'Codex SessionStart hook must track its canonical implementation with a Codex-root bootstrap');
+
+  const preToolUse = config.hooks.PreToolUse[0];
+  assert.strictEqual(preToolUse.matcher, '.*');
+  assert.strictEqual(preToolUse.id, 'pre:observe:continuous-learning');
+  assert.ok(preToolUse.hooks[0].command.includes('scripts/hooks/run-with-flags.js pre:observe scripts/hooks/observe-runner.js standard,strict'));
+  assert.ok(!preToolUse.hooks[0].command.includes('posttooluse-dispatcher.js'));
+
+  const postToolUse = config.hooks.PostToolUse[0];
+  assert.strictEqual(postToolUse.matcher, '.*');
+  assert.strictEqual(postToolUse.id, 'post:observe:continuous-learning');
+  assert.ok(postToolUse.hooks[0].command.includes('scripts/hooks/run-with-flags.js post:observe scripts/hooks/observe-runner.js standard,strict'));
+  assert.ok(!postToolUse.hooks[0].command.includes('posttooluse-dispatcher.js'));
+
+  const sessionEnd = config.hooks.SessionEnd[0];
+  assert.strictEqual(sessionEnd.matcher, '.*');
+  assert.strictEqual(sessionEnd.id, 'session:end:marker');
+  assert.ok(sessionEnd.hooks[0].command.includes('session:end:marker scripts/hooks/session-end-marker.js minimal,standard,strict 30000'));
+  assert.ok(sessionEnd.hooks[0].command.includes('scripts/hooks/lifecycle-hook-bootstrap.js'));
+  assert.ok(!sessionEnd.hooks[0].command.includes('posttooluse-dispatcher.js'));
 });
 
 test('hook documentation distinguishes the Claude off setting from runtime profiles', () => {
