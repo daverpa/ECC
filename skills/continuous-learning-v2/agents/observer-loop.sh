@@ -212,11 +212,6 @@ analyze_observations() {
     return
   fi
 
-  if ! command -v claude >/dev/null 2>&1; then
-    echo "[$(date)] claude CLI not found, skipping analysis" >> "$LOG_FILE"
-    return
-  fi
-
   # session-guardian: gate observer cycle (active hours, cooldown, idle detection)
   if ! bash "${SCRIPT_DIR}/session-guardian.sh"; then
     echo "[$(date)] Observer cycle skipped by session-guardian" >> "$LOG_FILE"
@@ -353,6 +348,8 @@ PROMPT
   if [ "$max_turns" -lt 4 ]; then
     max_turns=20
   fi
+  observer_provider="${ECC_OBSERVER_PROVIDER:-claude}"
+  observer_model="${ECC_OBSERVER_MODEL:-haiku}"
 
   # Ensure CWD is PROJECT_DIR so the relative analysis_relpath resolves correctly
   # on all platforms, not just when the observer happens to be launched from the project root.
@@ -396,9 +393,8 @@ PROMPT
   # Bash, including macOS's Bash 3.2 and Git Bash. That lets timeout/signal
   # cleanup terminate tool subprocesses as well as the direct CLI process.
   set -m
-  ECC_SKIP_OBSERVE=1 ECC_HOOK_PROFILE=minimal claude --model "${ECC_OBSERVER_MODEL:-haiku}" --max-turns "$max_turns" --print \
-    --allowedTools "Read,Write" \
-    -p "$prompt_content" < /dev/null >&8 2>> "$LOG_FILE" &
+  ECC_SKIP_OBSERVE=1 ECC_HOOK_PROFILE=minimal "${SCRIPT_DIR}/observer-provider-runner.sh" \
+    "$observer_provider" "$observer_model" "$max_turns" "$prompt_content" < /dev/null >&8 2>> "$LOG_FILE" &
   CLAUDE_PID=$!
   CLAUDE_PROCESS_GROUP=1
   set +m

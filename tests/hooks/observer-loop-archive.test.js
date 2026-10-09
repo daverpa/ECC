@@ -69,6 +69,9 @@ const repoRoot = path.resolve(__dirname, '..', '..');
 const observerLoopPath = path.join(
   repoRoot, 'skills', 'continuous-learning-v2', 'agents', 'observer-loop.sh'
 );
+const observerProviderRunnerPath = path.join(
+  repoRoot, 'skills', 'continuous-learning-v2', 'agents', 'observer-provider-runner.sh'
+);
 const ANALYSIS_COMPLETE_RECORD = '{"status":"analysis_complete"}';
 const ORIGINAL_OBSERVATIONS = '{"a":1}\n{"a":2}\n{"a":3}\n';
 
@@ -127,8 +130,11 @@ function runAnalyzeOnce(options = {}) {
 
     // Source a sandbox copy so the sibling guardian is deterministic.
     const observerFixture = path.join(observerFixtureDir, 'observer-loop.sh');
+    const observerProviderRunnerFixture = path.join(observerFixtureDir, 'observer-provider-runner.sh');
     const guardianStub = path.join(observerFixtureDir, 'session-guardian.sh');
     fs.copyFileSync(observerLoopPath, observerFixture);
+    fs.copyFileSync(observerProviderRunnerPath, observerProviderRunnerFixture);
+    fs.chmodSync(observerProviderRunnerFixture, 0o755);
     fs.writeFileSync(guardianStub, '#!/usr/bin/env bash\nexit 0\n');
     fs.chmodSync(guardianStub, 0o755);
 
@@ -228,6 +234,41 @@ function runAnalyzeOnce(options = {}) {
       log,
       tempEntries,
     };
+  } finally {
+    cleanupDir(sandbox);
+  }
+}
+
+function runProviderRunner(options = {}) {
+  const {
+    provider = 'claude',
+    claudeExitCode = 0,
+  } = options;
+  const sandbox = createTempDir();
+
+  try {
+    const binDir = path.join(sandbox, 'bin');
+    fs.mkdirSync(binDir, { recursive: true });
+
+    const claudeStub = path.join(binDir, 'claude');
+    fs.writeFileSync(claudeStub, [
+      '#!/usr/bin/env bash',
+      'exit "${CLAUDE_STUB_EXIT:-0}"',
+      '',
+    ].join('\n'));
+    fs.chmodSync(claudeStub, 0o755);
+
+    const env = {
+      ...process.env,
+      PATH: binDir + path.delimiter + process.env.PATH,
+      CLAUDE_STUB_EXIT: String(claudeExitCode),
+    };
+
+    return spawnSync(
+      'bash',
+      [observerProviderRunnerPath, provider, 'haiku', '20', 'prompt'],
+      { encoding: 'utf8', env }
+    );
   } finally {
     cleanupDir(sandbox);
   }
@@ -355,6 +396,19 @@ test('watchdog force-stops a process that ignores TERM and retains observations'
 });
 
 console.log('--- static guards ---');
+
+test('unsupported observer provider exits non-zero', () => {
+  skipOnWindows();
+  const result = runProviderRunner({ provider: 'unsupported' });
+  assert.notStrictEqual(result.status, 0);
+  assert.match(result.stderr, /unsupported observer provider: unsupported/);
+});
+
+test('claude observer provider preserves exit code', () => {
+  skipOnWindows();
+  const result = runProviderRunner({ claudeExitCode: 17 });
+  assert.strictEqual(result.status, 17);
+});
 
 test('process and semantic failure guards run before archival', () => {
   const content = fs.readFileSync(observerLoopPath, 'utf8');
