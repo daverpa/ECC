@@ -1175,6 +1175,10 @@ def _validate_observed_timestamp(value: object) -> str:
 
 
 def _validate_ingest_payload(raw: str) -> list[dict]:
+    allowed_payload_keys = {"status", "instincts"}
+    allowed_instinct_keys = {"id", "trigger", "domain", "action", "evidence"}
+    allowed_evidence_keys = {"count", "session_ids", "pattern", "last_observed"}
+
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -1182,6 +1186,9 @@ def _validate_ingest_payload(raw: str) -> list[dict]:
 
     if not isinstance(payload, dict):
         raise ValueError("payload must be a JSON object")
+    unexpected = sorted(set(payload) - allowed_payload_keys)
+    if unexpected:
+        raise ValueError(f"payload contains unexpected fields: {', '.join(unexpected)}")
     if payload.get("status") != "analysis_complete":
         raise ValueError("status must be analysis_complete")
     instincts = payload.get("instincts")
@@ -1193,6 +1200,11 @@ def _validate_ingest_payload(raw: str) -> list[dict]:
     for index, instinct in enumerate(instincts):
         if not isinstance(instinct, dict):
             raise ValueError(f"instinct[{index}] must be an object")
+        unexpected = sorted(set(instinct) - allowed_instinct_keys)
+        if unexpected:
+            raise ValueError(
+                f"instinct[{index}] contains unexpected fields: {', '.join(unexpected)}"
+            )
         missing = [key for key in ("id", "trigger", "domain", "action", "evidence") if key not in instinct]
         if missing:
             raise ValueError(f"instinct[{index}] missing required fields: {', '.join(missing)}")
@@ -1208,6 +1220,11 @@ def _validate_ingest_payload(raw: str) -> list[dict]:
         evidence = instinct["evidence"]
         if not isinstance(evidence, dict):
             raise ValueError(f"instinct[{index}].evidence must be an object")
+        unexpected = sorted(set(evidence) - allowed_evidence_keys)
+        if unexpected:
+            raise ValueError(
+                f"instinct[{index}].evidence contains unexpected fields: {', '.join(unexpected)}"
+            )
         missing_evidence = [
             key for key in ("count", "pattern", "last_observed", "session_ids")
             if key not in evidence
@@ -1315,6 +1332,24 @@ def _ingest_decisions(instincts: list[dict], project: dict) -> list[tuple[str, d
     return decisions
 
 
+def _validate_ingest_preflight(
+    decisions: list[tuple[str, dict, Path, Path | None]],
+) -> None:
+    """Check every path used by a mutating ingest before the first write."""
+    for action, instinct, path, stale_path in decisions:
+        if action not in {"create", "update"}:
+            continue
+        if not path.parent.is_dir():
+            raise ValueError(f"ingest target directory is unavailable: {path.parent}")
+        if path.exists() and not path.is_file():
+            raise ValueError(f"ingest target is not a file: {path}")
+        if stale_path is not None:
+            if not stale_path.exists():
+                raise ValueError(f"stale instinct path is missing: {stale_path}")
+            if not stale_path.is_file():
+                raise ValueError(f"stale instinct path is not a file: {stale_path}")
+
+
 def cmd_ingest(args) -> int:
     """Ingest structured observer-analysis JSON into project personal instincts."""
     project = detect_project(persist=not args.dry_run)
@@ -1334,6 +1369,7 @@ def cmd_ingest(args) -> int:
     if args.dry_run:
         try:
             decisions = _ingest_decisions(instincts, project)
+            _validate_ingest_preflight(decisions)
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
@@ -1349,6 +1385,7 @@ def cmd_ingest(args) -> int:
     with _project_lock(project):
         try:
             decisions = _ingest_decisions(instincts, project)
+            _validate_ingest_preflight(decisions)
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
