@@ -231,6 +231,7 @@ try:
         tool_output = data.get("tool_output", data.get("output", ""))
     session_id = data.get("session_id", "unknown")
     tool_use_id = data.get("tool_use_id", "")
+    turn_id = data.get("turn_id", "")
     cwd = data.get("cwd", "")
 
     # Truncate large inputs/outputs
@@ -252,6 +253,7 @@ try:
         "output": tool_response_str if event == "tool_complete" else None,
         "session": session_id,
         "tool_use_id": tool_use_id,
+        "turn_id": turn_id,
         "cwd": cwd
     }))
 except Exception as e:
@@ -357,6 +359,10 @@ if parsed["input"]:
     observation["input"] = scrub(parsed["input"])
 if parsed["output"] is not None:
     observation["output"] = scrub(parsed["output"])
+if isinstance(parsed.get("tool_use_id"), str) and parsed["tool_use_id"]:
+    observation["tool_use_id"] = parsed["tool_use_id"]
+if isinstance(parsed.get("turn_id"), str) and parsed["turn_id"]:
+    observation["turn_id"] = parsed["turn_id"]
 
 print(json.dumps(observation))
 ' >> "$OBSERVATIONS_FILE"

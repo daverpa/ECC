@@ -117,6 +117,16 @@ function filesContaining(rootPath, needle) {
   });
 }
 
+function readObservations(fixtureRoot) {
+  const observationsPath = collectFiles(fixtureRoot).find((filePath) => path.basename(filePath) === 'observations.jsonl');
+  assert.ok(observationsPath, 'Expected fixture project observations.jsonl to exist');
+  return fs.readFileSync(observationsPath, 'utf8')
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
 test('installed Codex SessionStart hook resolves from PLUGIN_ROOT and emits Codex output', () => {
   const result = runSessionStart({ pluginRoot: repoRoot });
   assert.strictEqual(result.status, 0, result.stderr || result.error?.message);
@@ -148,6 +158,11 @@ test('Codex PreToolUse hook runs from PLUGIN_ROOT without caller CLAUDE_PLUGIN_R
   try {
     const result = runCommand(preToolUse.command, { ...fixture, payload });
     assert.strictEqual(result.status, 0, result.stderr || result.error?.message);
+    const toolStartObservations = readObservations(fixture.fixtureRoot).filter((observation) => observation.event === 'tool_start');
+    assert.strictEqual(toolStartObservations.length, 1);
+    assert.strictEqual(toolStartObservations[0].session, 'codex-native-prepost-test');
+    assert.strictEqual(toolStartObservations[0].tool_use_id, 'tool-use-1');
+    assert.strictEqual(toolStartObservations[0].turn_id, 'turn-1');
   } finally {
     fs.rmSync(fixture.fixtureRoot, { recursive: true, force: true });
   }
@@ -171,6 +186,36 @@ test('Codex PostToolUse hook runs for the same native tool identity', () => {
   try {
     const result = runCommand(postToolUse.command, { ...fixture, payload });
     assert.strictEqual(result.status, 0, result.stderr || result.error?.message);
+    const toolCompleteObservations = readObservations(fixture.fixtureRoot).filter((observation) => observation.event === 'tool_complete');
+    assert.strictEqual(toolCompleteObservations.length, 1);
+    assert.strictEqual(toolCompleteObservations[0].session, 'codex-native-prepost-test');
+    assert.strictEqual(toolCompleteObservations[0].tool_use_id, 'tool-use-1');
+    assert.strictEqual(toolCompleteObservations[0].turn_id, 'turn-1');
+  } finally {
+    fs.rmSync(fixture.fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test('Codex PreToolUse hook omits empty native metadata for backward-compatible payloads', () => {
+  const fixture = createFixture();
+  const payload = {
+    session_id: 'codex-native-backcompat-test',
+    cwd: fixture.projectDir,
+    hook_event_name: 'PreToolUse',
+    model: 'gpt-5-codex',
+    permission_mode: 'default',
+    tool_name: 'Bash',
+    tool_input: { command: 'printf ok' }
+  };
+
+  try {
+    const result = runCommand(preToolUse.command, { ...fixture, payload });
+    assert.strictEqual(result.status, 0, result.stderr || result.error?.message);
+    const toolStartObservations = readObservations(fixture.fixtureRoot).filter((observation) => observation.event === 'tool_start');
+    assert.strictEqual(toolStartObservations.length, 1);
+    assert.strictEqual(toolStartObservations[0].session, 'codex-native-backcompat-test');
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(toolStartObservations[0], 'tool_use_id'), false);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(toolStartObservations[0], 'turn_id'), false);
   } finally {
     fs.rmSync(fixture.fixtureRoot, { recursive: true, force: true });
   }
