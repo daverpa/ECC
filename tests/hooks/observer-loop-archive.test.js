@@ -99,6 +99,8 @@ function runAnalyzeOnce(options = {}) {
     observerTimeoutSeconds = 10,
     probeResultPath = false,
     provider = 'claude',
+    captureAnalysis = false,
+    observations = ORIGINAL_OBSERVATIONS,
   } = options;
   const sandbox = createTempDir();
 
@@ -113,6 +115,7 @@ function runAnalyzeOnce(options = {}) {
     fs.mkdirSync(scriptsFixtureDir, { recursive: true });
 
     const claudeStub = path.join(binDir, 'claude');
+    const analysisCaptureFile = path.join(projectDir, 'analysis-capture.jsonl');
     const claudeModelFile = path.join(projectDir, 'claude-model');
     fs.writeFileSync(claudeStub, [
       '#!/usr/bin/env bash',
@@ -124,6 +127,13 @@ function runAnalyzeOnce(options = {}) {
       '  fi',
       '  shift || true',
       'done',
+      'if [ "${CLAUDE_STUB_CAPTURE_ANALYSIS:-false}" = "true" ]; then',
+      '  for candidate in "${PROJECT_DIR}"/.observer-tmp/ecc-observer-analysis.*; do',
+      '    [ -f "$candidate" ] || continue',
+      '    cp "$candidate" "${CLAUDE_STUB_ANALYSIS_CAPTURE_FILE}"',
+      '    break',
+      '  done',
+      'fi',
       "printf '%s\n' \"$$\" > \"${CLAUDE_STUB_PID_FILE}\"",
       "if [ \"${CLAUDE_STUB_IGNORE_TERM:-false}\" = \"true\" ]; then trap '' TERM; fi",
       'if [ "${CLAUDE_STUB_SPAWN_CHILD:-false}" = "true" ]; then',
@@ -163,6 +173,10 @@ function runAnalyzeOnce(options = {}) {
       'if (process.env.CODEX_STUB_WRITES_RESULT !== "false" && resultPath) {',
       `  fs.writeFileSync(resultPath, '${EMPTY_CODEX_RESULT}\\n');`,
       '}',
+      'if (process.env.CODEX_STUB_REPLACE_RESULT_WITH_SYMLINK === "true" && resultPath) {',
+      '  fs.unlinkSync(resultPath);',
+      '  fs.symlinkSync(process.env.CODEX_SYMLINK_TARGET, resultPath);',
+      '}',
       'process.exit(Number(process.env.CODEX_STUB_EXIT || "0"));',
       '',
     ].join('\n'));
@@ -198,7 +212,8 @@ function runAnalyzeOnce(options = {}) {
     const claudePidFile = path.join(projectDir, 'claude-stub.pid');
     const claudeChildPidFile = path.join(projectDir, 'claude-stub-child.pid');
     const attackFile = path.join(projectDir, 'result-path-attack-found');
-    fs.writeFileSync(observationsFile, ORIGINAL_OBSERVATIONS);
+    fs.writeFileSync(observationsFile, observations);
+    const originalObservations = fs.readFileSync(observationsFile, 'utf8');
     if (existingLog) fs.writeFileSync(logFile, existingLog);
 
     const inheritedEnv = Object.fromEntries(
@@ -220,8 +235,12 @@ function runAnalyzeOnce(options = {}) {
       CLAUDE_STUB_PID_FILE: claudePidFile,
       CLAUDE_STUB_CHILD_PID_FILE: claudeChildPidFile,
       CLAUDE_STUB_ATTACK_FILE: attackFile,
+      CLAUDE_STUB_CAPTURE_ANALYSIS: String(captureAnalysis),
+      CLAUDE_STUB_ANALYSIS_CAPTURE_FILE: analysisCaptureFile,
       CODEX_STUB_EXIT: String(codexExitCode),
       CODEX_STUB_WRITES_RESULT: String(codexWritesResult),
+      CODEX_STUB_REPLACE_RESULT_WITH_SYMLINK: String(options.codexReplaceResultWithSymlink || false),
+      CODEX_SYMLINK_TARGET: path.join(projectDir, 'attacker-result.json'),
       CODEX_ARGS_FILE: codexArgsFile,
       INGEST_STUB_EXIT: String(ingestExitCode),
       INGEST_PROJECT_ROOT_FILE: path.join(projectDir, 'ingest-project-root'),
@@ -241,6 +260,7 @@ function runAnalyzeOnce(options = {}) {
       ECC_OBSERVER_PROVIDER: provider,
       ECC_OBSERVER_ALLOW_WINDOWS: 'false',
       CLV2_PYTHON_CMD: 'bash',
+      CLV2_COMPACTION_PYTHON_CMD: process.env.PYTHON3 || 'python3',
     };
     if (observerModel !== undefined) {
       childEnv.ECC_OBSERVER_MODEL = observerModel;
@@ -309,6 +329,10 @@ function runAnalyzeOnce(options = {}) {
       log,
       projectRoot: childEnv.PROJECT_ROOT,
       tempEntries,
+      rawObservations: originalObservations,
+      analysisPayload: fs.existsSync(analysisCaptureFile)
+        ? fs.readFileSync(analysisCaptureFile, 'utf8')
+        : null,
     };
   } finally {
     cleanupDir(sandbox);
@@ -478,6 +502,40 @@ test('successful analysis archives the original batch byte-for-byte', () => {
   assert.deepStrictEqual(state.tempEntries, []);
 });
 
+test('analysis payload compacts exact repeats without changing persisted observations', () => {
+  skipOnWindows();
+  const repetitive = [1, 2, 3].map(() => JSON.stringify({
+    timestamp: '2026-01-01T00:00:00Z', event: 'tool_complete', tool: 'Read',
+    output: 'same output', session: 'session-1', tool_use_id: 'use-1', turn_id: 'turn-1',
+  })).join('\n') + '\n';
+  const state = runAnalyzeOnce({
+    observations: repetitive,
+    captureAnalysis: true,
+    claudeOutput: `${ANALYSIS_COMPLETE_RECORD}\n`,
+  });
+  assert.strictEqual(state.rawObservations, repetitive);
+  assert.strictEqual(state.analysisPayload.trim().split('\n').length, 1);
+  const compacted = JSON.parse(state.analysisPayload);
+  assert.strictEqual(compacted._compaction.raw_occurrences, 3);
+  assert.deepStrictEqual(compacted._compaction.sessions, ['session-1']);
+  assert.strictEqual(state.archivedContents[0], repetitive);
+});
+
+test('analysis payload keeps meaningful observation differences separate', () => {
+  skipOnWindows();
+  const observations = [
+    { timestamp: '2026-01-01T00:00:00Z', event: 'tool_complete', tool: 'Read', output: 'one', session: 's1' },
+    { timestamp: '2026-01-01T00:00:01Z', event: 'tool_complete', tool: 'Read', output: 'two', session: 's1' },
+  ].map(JSON.stringify).join('\n') + '\n';
+  const state = runAnalyzeOnce({
+    observations,
+    captureAnalysis: true,
+    claudeOutput: `${ANALYSIS_COMPLETE_RECORD}\n`,
+  });
+  assert.strictEqual(state.analysisPayload.trim().split('\n').length, 2);
+  assert.strictEqual(state.rawObservations, observations);
+});
+
 test('codex success archives after ingest succeeds', () => {
   skipOnWindows();
   const state = runAnalyzeOnce({ provider: 'codex' });
@@ -498,6 +556,14 @@ test('codex non-zero exit retains observations', () => {
 test('codex zero exit without result retains observations', () => {
   skipOnWindows();
   const state = runAnalyzeOnce({ provider: 'codex', codexWritesResult: false });
+  assertOriginalBatchIsRetryable(state);
+  assert.match(state.log, /Codex analysis result file missing or invalid.*retaining observations for retry/);
+  assert.deepStrictEqual(state.tempEntries, []);
+});
+
+test('codex result pathname replaced with symlink retains observations', () => {
+  skipOnWindows();
+  const state = runAnalyzeOnce({ provider: 'codex', codexReplaceResultWithSymlink: true });
   assertOriginalBatchIsRetryable(state);
   assert.match(state.log, /Codex analysis result file missing or invalid.*retaining observations for retry/);
   assert.deepStrictEqual(state.tempEntries, []);

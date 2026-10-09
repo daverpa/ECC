@@ -195,6 +195,66 @@ wait_for_claude_analysis() {
   done
 }
 
+compact_analysis_payload() {
+  local source_file="$1"
+  local compacted_file
+  local compaction_python_cmd="${CLV2_COMPACTION_PYTHON_CMD:-$python_cmd}"
+  compacted_file="$(mktemp "${observer_tmp_dir}/ecc-observer-compacted.XXXXXX")" || return 1
+
+  if ! "$compaction_python_cmd" - "$source_file" > "$compacted_file" <<'PY'
+import json
+import sys
+
+source = sys.argv[1]
+groups = {}
+order = []
+correlation_keys = {"timestamp", "session", "tool_use_id", "turn_id"}
+
+with open(source, encoding="utf-8") as handle:
+    for line in handle:
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        key = json.dumps(
+            {name: value for name, value in record.items() if name not in correlation_keys},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        if key not in groups:
+            groups[key] = {"record": record, "timestamps": [], "sessions": [], "tool_use_ids": [], "turn_ids": [], "count": 0}
+            order.append(key)
+        group = groups[key]
+        group["count"] += 1
+        for field, output in (("timestamp", group["timestamps"]), ("session", group["sessions"]),
+                              ("tool_use_id", group["tool_use_ids"]), ("turn_id", group["turn_ids"])):
+            value = record.get(field)
+            if value and value not in output:
+                output.append(value)
+
+for key in order:
+    group = groups[key]
+    record = group["record"]
+    if group["count"] > 1:
+        record["_compaction"] = {
+            "raw_occurrences": group["count"],
+            "timestamps": group["timestamps"],
+            "sessions": group["sessions"],
+            "tool_use_ids": group["tool_use_ids"],
+            "turn_ids": group["turn_ids"],
+        }
+    print(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+PY
+  then
+    rm -f "$compacted_file"
+    return 1
+  fi
+  if ! mv "$compacted_file" "$source_file"; then
+    rm -f "$compacted_file"
+    return 1
+  fi
+}
+
 analyze_observations() {
   if [ ! -f "$OBSERVATIONS_FILE" ]; then
     return
@@ -222,7 +282,10 @@ analyze_observations() {
   # This prevents multi-MB payloads from being passed to the LLM.
   MAX_ANALYSIS_LINES="${ECC_OBSERVER_MAX_ANALYSIS_LINES:-500}"
   observer_tmp_dir="${PROJECT_DIR}/.observer-tmp"
-  mkdir -p "$observer_tmp_dir"
+  if ! mkdir -p "$observer_tmp_dir" || ! chmod 700 "$observer_tmp_dir"; then
+    echo "[$(date)] Failed to prepare private observer temporary directory; retaining observations for retry" >> "$LOG_FILE"
+    return
+  fi
   # Keep the XXXXXX run at the very end of the template: BSD/macOS mktemp only
   # substitutes a trailing X run, so a suffix after it (e.g. `.jsonl`) produces a
   # literal, non-random name that wedges every later cycle with "File exists" (#2417).
@@ -240,6 +303,14 @@ analyze_observations() {
   fi
   analysis_count=$(wc -l < "$analysis_file" 2>/dev/null || echo 0)
   echo "[$(date)] Using last $analysis_count of $obs_count observations for analysis" >> "$LOG_FILE"
+  python_cmd="${CLV2_PYTHON_CMD:-python3}"
+  if ! compact_analysis_payload "$analysis_file"; then
+    echo "[$(date)] Failed to compact observer analysis payload; retaining observations for retry" >> "$LOG_FILE"
+    cleanup_analysis_resources
+    return
+  fi
+  compacted_analysis_count=$(wc -l < "$analysis_file" 2>/dev/null || echo 0)
+  echo "[$(date)] Compacted analysis payload to $compacted_analysis_count records" >> "$LOG_FILE"
 
   # Claude Code resolves relative paths against the user's home directory on
   # macOS/Linux, even though the observer changes to PROJECT_DIR first. Use
@@ -265,6 +336,7 @@ IMPORTANT: You are running in non-interactive --print mode. You MUST use the Wri
 
 Read ${analysis_relpath} and identify patterns for the project ${PROJECT_NAME} (user corrections, error resolutions, repeated workflows, tool preferences).
 If you find 3+ occurrences of the same pattern, you MUST write an instinct file directly to ${INSTINCTS_DIR}/<id>.md using the Write tool.
+Compacted records may include _compaction.raw_occurrences and metadata arrays; count raw occurrences, not compacted lines, and preserve all listed sessions and correlation IDs when forming evidence.
 Do NOT ask for permission to write files, do NOT describe what you would write, and do NOT stop at analysis when a qualifying pattern exists.
 
 CRITICAL: Every instinct file MUST use this exact format:
@@ -374,6 +446,7 @@ Rules:
 - Never run mutation commands.
 - Do not emit confidence, source, scope, project_id, or project_name; host-side ingest derives those fields.
 - Each instinct must include id, trigger, domain, action, and evidence with count, session_ids, pattern, and a timezone-aware last_observed date-time.
+- Compacted records may include _compaction.raw_occurrences and metadata arrays; count raw occurrences, not compacted lines, and preserve all listed sessions and correlation IDs when forming evidence.
 - Return status analysis_complete even when instincts is empty after successful analysis.
 PROMPT
     prompt_content="$(cat "$prompt_file" 2>/dev/null || true)"
@@ -443,7 +516,10 @@ PROMPT
       return
     fi
 
-    if [ ! -f "$analysis_result_file" ] || [ -L "$analysis_result_file" ]; then
+    result_parent="$(cd "$(dirname "$analysis_result_file")" 2>/dev/null && pwd -P)"
+    expected_result_parent="$(cd "$observer_tmp_dir" 2>/dev/null && pwd -P)"
+    if [ ! -f "$analysis_result_file" ] || [ -L "$analysis_result_file" ] ||
+      [ -z "$result_parent" ] || [ "$result_parent" != "$expected_result_parent" ]; then
       echo "[$(date)] Codex analysis result file missing or invalid; retaining observations for retry" >> "$LOG_FILE"
       cleanup_analysis_resources
       return
