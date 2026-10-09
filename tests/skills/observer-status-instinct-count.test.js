@@ -84,7 +84,7 @@ function checkChild(result) {
   assert.strictEqual(result.status, 0, result.stderr || result.stdout || `child signal: ${result.signal}`);
 }
 
-function runStatus(files, { run = spawnSync, setup = () => {}, remove = fs.rmSync } = {}) {
+function runStatus(files, { run = spawnSync, setup = () => {}, assertOutput = () => {}, remove = fs.rmSync } = {}) {
   return withFixture(fixture => {
     for (const name of files) {
       const target = path.join(fixture.instincts, name);
@@ -104,6 +104,7 @@ function runStatus(files, { run = spawnSync, setup = () => {}, remove = fs.rmSyn
     });
     checkChild(result);
     assert.ok(!fs.existsSync(fixture.unexpected), 'status must not invoke Git, Python or a provider');
+    assertOutput(result);
     const lines = (result.stdout || '').split('\n').filter(line => line.startsWith('Instincts:'));
     assert.strictEqual(lines.length, 1, `expected one count in status output:\n${result.stdout}`);
     assert.match(lines[0], /^Instincts:\s+\d+\s*$/);
@@ -215,6 +216,15 @@ function buildTests() {
     })],
     ['an empty instincts directory reports 0', shellTest(() => {
       assert.strictEqual(runStatus([]), 0);
+    })],
+    ['missing observations file reports 0 without shell error', shellTest(() => {
+      assert.strictEqual(runStatus([], {
+        setup: value => fs.rmSync(path.join(value.root, 'homunculus', 'observations.jsonl'), { force: true }),
+        assertOutput: result => {
+          assert.match(result.stdout, /(?:^|\n)Observations: 0 lines(?:\n|$)/);
+          assert.strictEqual(result.stderr, '');
+        },
+      }), 0);
     })],
     ['hidden stems count but dot-only extension names have no suffix', shellTest(() => {
       assert.strictEqual(runStatus(['.note.MD', '.yaml', '.YML', '.md']), 1);

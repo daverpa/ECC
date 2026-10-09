@@ -72,8 +72,12 @@ const observerLoopPath = path.join(
 const observerProviderRunnerPath = path.join(
   repoRoot, 'skills', 'continuous-learning-v2', 'agents', 'observer-provider-runner.sh'
 );
+const startObserverPath = path.join(
+  repoRoot, 'skills', 'continuous-learning-v2', 'agents', 'start-observer.sh'
+);
 const ANALYSIS_COMPLETE_RECORD = '{"status":"analysis_complete"}';
 const ORIGINAL_OBSERVATIONS = '{"a":1}\n{"a":2}\n{"a":3}\n';
+const EMPTY_CODEX_RESULT = '{"status":"analysis_complete","instincts":[]}';
 
 /**
  * Source observer-loop.sh in a sandbox and invoke analyze_observations once.
@@ -86,9 +90,15 @@ function runAnalyzeOnce(options = {}) {
     claudeDelaySeconds = 0,
     claudeIgnoreTerm = false,
     claudeSpawnChild = false,
+    codexExitCode = 0,
+    codexWritesResult = true,
+    codexModel = undefined,
+    observerModel = undefined,
+    ingestExitCode = 0,
     existingLog = '',
     observerTimeoutSeconds = 10,
     probeResultPath = false,
+    provider = 'claude',
   } = options;
   const sandbox = createTempDir();
 
@@ -96,13 +106,24 @@ function runAnalyzeOnce(options = {}) {
     const binDir = path.join(sandbox, 'bin');
     const projectDir = path.join(sandbox, 'project');
     const observerFixtureDir = path.join(sandbox, 'observer');
+    const scriptsFixtureDir = path.join(sandbox, 'scripts');
     fs.mkdirSync(binDir, { recursive: true });
     fs.mkdirSync(projectDir, { recursive: true });
     fs.mkdirSync(observerFixtureDir, { recursive: true });
+    fs.mkdirSync(scriptsFixtureDir, { recursive: true });
 
     const claudeStub = path.join(binDir, 'claude');
+    const claudeModelFile = path.join(projectDir, 'claude-model');
     fs.writeFileSync(claudeStub, [
       '#!/usr/bin/env bash',
+      'while [ "$#" -gt 0 ]; do',
+      '  if [ "$1" = "--model" ]; then',
+      '    shift',
+      '    printf "%s\\n" "${1:-}" > "$CLAUDE_MODEL_FILE"',
+      '    break',
+      '  fi',
+      '  shift || true',
+      'done',
       "printf '%s\n' \"$$\" > \"${CLAUDE_STUB_PID_FILE}\"",
       "if [ \"${CLAUDE_STUB_IGNORE_TERM:-false}\" = \"true\" ]; then trap '' TERM; fi",
       'if [ "${CLAUDE_STUB_SPAWN_CHILD:-false}" = "true" ]; then',
@@ -128,6 +149,25 @@ function runAnalyzeOnce(options = {}) {
     ].join('\n'));
     fs.chmodSync(claudeStub, 0o755);
 
+    const codexStub = path.join(binDir, 'codex');
+    const codexArgsFile = path.join(projectDir, 'codex-args.json');
+    fs.writeFileSync(codexStub, [
+      '#!/usr/bin/env node',
+      'const fs = require("fs");',
+      'const argv = process.argv.slice(2);',
+      'fs.writeFileSync(process.env.CODEX_ARGS_FILE, JSON.stringify(argv));',
+      'let resultPath = "";',
+      'for (let index = 0; index < argv.length; index += 1) {',
+      '  if (argv[index] === "-o") resultPath = argv[index + 1] || "";',
+      '}',
+      'if (process.env.CODEX_STUB_WRITES_RESULT !== "false" && resultPath) {',
+      `  fs.writeFileSync(resultPath, '${EMPTY_CODEX_RESULT}\\n');`,
+      '}',
+      'process.exit(Number(process.env.CODEX_STUB_EXIT || "0"));',
+      '',
+    ].join('\n'));
+    fs.chmodSync(codexStub, 0o755);
+
     // Source a sandbox copy so the sibling guardian is deterministic.
     const observerFixture = path.join(observerFixtureDir, 'observer-loop.sh');
     const observerProviderRunnerFixture = path.join(observerFixtureDir, 'observer-provider-runner.sh');
@@ -137,6 +177,14 @@ function runAnalyzeOnce(options = {}) {
     fs.chmodSync(observerProviderRunnerFixture, 0o755);
     fs.writeFileSync(guardianStub, '#!/usr/bin/env bash\nexit 0\n');
     fs.chmodSync(guardianStub, 0o755);
+    const instinctCliStub = path.join(scriptsFixtureDir, 'instinct-cli.py');
+    fs.writeFileSync(instinctCliStub, [
+      '#!/usr/bin/env bash',
+      'printf "%s\\n" "$CLAUDE_PROJECT_DIR" > "$INGEST_PROJECT_ROOT_FILE"',
+      'exit "${INGEST_STUB_EXIT:-0}"',
+      '',
+    ].join('\n'));
+    fs.chmodSync(instinctCliStub, 0o755);
 
     const driver = path.join(sandbox, 'driver.sh');
     fs.writeFileSync(
@@ -161,6 +209,7 @@ function runAnalyzeOnce(options = {}) {
     const childEnv = {
       ...inheritedEnv,
       PATH: binDir + path.delimiter + process.env.PATH,
+      CLAUDE_MODEL_FILE: claudeModelFile,
       CLAUDE_STUB_EXIT: String(claudeExitCode),
       CLAUDE_STUB_OUTPUT: claudeOutput,
       CLAUDE_STUB_STDERR: claudeStderr,
@@ -171,9 +220,15 @@ function runAnalyzeOnce(options = {}) {
       CLAUDE_STUB_PID_FILE: claudePidFile,
       CLAUDE_STUB_CHILD_PID_FILE: claudeChildPidFile,
       CLAUDE_STUB_ATTACK_FILE: attackFile,
+      CODEX_STUB_EXIT: String(codexExitCode),
+      CODEX_STUB_WRITES_RESULT: String(codexWritesResult),
+      CODEX_ARGS_FILE: codexArgsFile,
+      INGEST_STUB_EXIT: String(ingestExitCode),
+      INGEST_PROJECT_ROOT_FILE: path.join(projectDir, 'ingest-project-root'),
       OBSERVATIONS_FILE: observationsFile,
       MIN_OBSERVATIONS: '1',
       PROJECT_DIR: projectDir,
+      PROJECT_ROOT: path.join(sandbox, 'actual-user-project'),
       LOG_FILE: logFile,
       PROJECT_NAME: 'test-project',
       PROJECT_ID: 'test-project',
@@ -183,9 +238,16 @@ function runAnalyzeOnce(options = {}) {
       ECC_OBSERVER_TIMEOUT_SECONDS: String(observerTimeoutSeconds),
       ECC_OBSERVER_MAX_ANALYSIS_LINES: '500',
       ECC_OBSERVER_MAX_TURNS: '20',
-      ECC_OBSERVER_MODEL: 'haiku',
+      ECC_OBSERVER_PROVIDER: provider,
       ECC_OBSERVER_ALLOW_WINDOWS: 'false',
+      CLV2_PYTHON_CMD: 'bash',
     };
+    if (observerModel !== undefined) {
+      childEnv.ECC_OBSERVER_MODEL = observerModel;
+    }
+    if (codexModel !== undefined) {
+      childEnv.ECC_OBSERVER_CODEX_MODEL = codexModel;
+    }
 
     const startedAt = Date.now();
     const result = spawnSync('bash', [driver], {
@@ -213,6 +275,16 @@ function runAnalyzeOnce(options = {}) {
       ? fs.readFileSync(observationsFile, 'utf8')
       : null;
     const log = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '';
+    const claudeModel = fs.existsSync(claudeModelFile)
+      ? fs.readFileSync(claudeModelFile, 'utf8').trim()
+      : null;
+    const codexArgs = fs.existsSync(codexArgsFile)
+      ? JSON.parse(fs.readFileSync(codexArgsFile, 'utf8'))
+      : null;
+    const ingestProjectRootFile = childEnv.INGEST_PROJECT_ROOT_FILE;
+    const ingestProjectRoot = fs.existsSync(ingestProjectRootFile)
+      ? fs.readFileSync(ingestProjectRootFile, 'utf8').trim()
+      : null;
     const observerTempDir = path.join(projectDir, '.observer-tmp');
     const tempEntries = fs.existsSync(observerTempDir)
       ? fs.readdirSync(observerTempDir)
@@ -227,11 +299,15 @@ function runAnalyzeOnce(options = {}) {
     return {
       archivedContents,
       attackFound: fs.existsSync(attackFile),
+      claudeModel,
       claudeStillRunning: processExists(claudePid),
       claudeChildStillRunning: processExists(claudeChildPid),
+      codexArgs,
       durationMs,
+      ingestProjectRoot,
       liveContent,
       log,
+      projectRoot: childEnv.PROJECT_ROOT,
       tempEntries,
     };
   } finally {
@@ -243,6 +319,9 @@ function runProviderRunner(options = {}) {
   const {
     provider = 'claude',
     claudeExitCode = 0,
+    codexHome = '',
+    model = provider === 'codex' ? 'gpt-5-codex' : 'haiku',
+    prompt = 'prompt',
   } = options;
   const sandbox = createTempDir();
 
@@ -257,18 +336,47 @@ function runProviderRunner(options = {}) {
       '',
     ].join('\n'));
     fs.chmodSync(claudeStub, 0o755);
+    const codexRecord = path.join(sandbox, 'codex-record.json');
+    const codexStub = path.join(binDir, 'codex');
+    fs.writeFileSync(codexStub, [
+      '#!/usr/bin/env node',
+      'const fs = require("fs");',
+      'fs.writeFileSync(process.env.CODEX_RECORD_PATH, JSON.stringify({',
+      '  argv: process.argv.slice(2),',
+      '  codexHome: process.env.CODEX_HOME || "",',
+      '}));',
+      'process.exit(0);',
+      '',
+    ].join('\n'));
+    fs.chmodSync(codexStub, 0o755);
+
+    const resultPath = path.join(sandbox, 'result.json');
+    const schemaPath = path.join(sandbox, 'schema.json');
+    const workingDir = path.join(sandbox, 'work');
+    fs.writeFileSync(schemaPath, '{}');
+    fs.mkdirSync(workingDir, { recursive: true });
 
     const env = {
       ...process.env,
       PATH: binDir + path.delimiter + process.env.PATH,
       CLAUDE_STUB_EXIT: String(claudeExitCode),
+      CODEX_RECORD_PATH: codexRecord,
     };
+    if (codexHome) env.ECC_OBSERVER_CODEX_HOME = codexHome;
 
-    return spawnSync(
+    const args = provider === 'codex'
+      ? [observerProviderRunnerPath, provider, model, '20', prompt, resultPath, schemaPath, workingDir]
+      : [observerProviderRunnerPath, provider, model, '20', prompt];
+    const result = spawnSync(
       'bash',
-      [observerProviderRunnerPath, provider, 'haiku', '20', 'prompt'],
+      args,
       { encoding: 'utf8', env }
     );
+    result.codexRecord = fs.existsSync(codexRecord)
+      ? JSON.parse(fs.readFileSync(codexRecord, 'utf8'))
+      : null;
+    result.codexPaths = { resultPath, schemaPath, workingDir };
+    return result;
   } finally {
     cleanupDir(sandbox);
   }
@@ -370,6 +478,85 @@ test('successful analysis archives the original batch byte-for-byte', () => {
   assert.deepStrictEqual(state.tempEntries, []);
 });
 
+test('codex success archives after ingest succeeds', () => {
+  skipOnWindows();
+  const state = runAnalyzeOnce({ provider: 'codex' });
+  assert.strictEqual(state.liveContent, null);
+  assert.deepStrictEqual(state.archivedContents, [ORIGINAL_OBSERVATIONS]);
+  assert.deepStrictEqual(state.tempEntries, []);
+  assert.strictEqual(state.ingestProjectRoot, state.projectRoot);
+});
+
+test('codex non-zero exit retains observations', () => {
+  skipOnWindows();
+  const state = runAnalyzeOnce({ provider: 'codex', codexExitCode: 9 });
+  assertOriginalBatchIsRetryable(state);
+  assert.match(state.log, /Codex analysis failed.*retaining observations for retry/);
+  assert.deepStrictEqual(state.tempEntries, []);
+});
+
+test('codex zero exit without result retains observations', () => {
+  skipOnWindows();
+  const state = runAnalyzeOnce({ provider: 'codex', codexWritesResult: false });
+  assertOriginalBatchIsRetryable(state);
+  assert.match(state.log, /Codex analysis result file missing or invalid.*retaining observations for retry/);
+  assert.deepStrictEqual(state.tempEntries, []);
+});
+
+test('codex ingest failure retains observations', () => {
+  skipOnWindows();
+  const state = runAnalyzeOnce({ provider: 'codex', ingestExitCode: 4 });
+  assertOriginalBatchIsRetryable(state);
+  assert.match(state.log, /Codex observer ingest failed.*retaining observations for retry/);
+  assert.deepStrictEqual(state.tempEntries, []);
+});
+
+test('codex empty valid result archives after ingest succeeds', () => {
+  skipOnWindows();
+  const state = runAnalyzeOnce({ provider: 'codex' });
+  assert.strictEqual(state.liveContent, null);
+  assert.deepStrictEqual(state.archivedContents, [ORIGINAL_OBSERVATIONS]);
+});
+
+test('claude observer defaults to haiku without model override', () => {
+  skipOnWindows();
+  const state = runAnalyzeOnce({
+    claudeOutput: `${ANALYSIS_COMPLETE_RECORD}\n`,
+    observerModel: undefined,
+  });
+  assert.strictEqual(state.claudeModel, 'haiku');
+});
+
+test('codex observer omits model override without codex model override', () => {
+  skipOnWindows();
+  const state = runAnalyzeOnce({
+    provider: 'codex',
+    observerModel: undefined,
+  });
+  assert.ok(!state.codexArgs.includes('-m'));
+});
+
+test('codex observer uses explicit codex model override', () => {
+  skipOnWindows();
+  const state = runAnalyzeOnce({
+    provider: 'codex',
+    codexModel: 'gpt-5.5',
+  });
+  assert.deepStrictEqual(
+    state.codexArgs.slice(state.codexArgs.indexOf('-m'), state.codexArgs.indexOf('-m') + 2),
+    ['-m', 'gpt-5.5']
+  );
+});
+
+test('codex observer ignores generic observer model override', () => {
+  skipOnWindows();
+  const state = runAnalyzeOnce({
+    provider: 'codex',
+    observerModel: 'haiku',
+  });
+  assert.ok(!state.codexArgs.includes('-m'));
+});
+
 test('completion record accepts a CRLF line ending', () => {
   skipOnWindows();
   const state = runAnalyzeOnce({
@@ -410,11 +597,47 @@ test('claude observer provider preserves exit code', () => {
   assert.strictEqual(result.status, 17);
 });
 
+test('codex observer provider command contract', () => {
+  skipOnWindows();
+  const prompt = 'prompt with spaces; $(not-run)';
+  const result = runProviderRunner({
+    provider: 'codex',
+    codexHome: '/tmp/ecc-codex-home',
+    prompt,
+  });
+  assert.strictEqual(result.status, 0, result.stderr);
+  const argv = result.codexRecord.argv;
+  assert.deepStrictEqual(argv.slice(0, 3), ['--ask-for-approval', 'never', 'exec']);
+  assert.ok(argv.indexOf('--ask-for-approval') < argv.indexOf('exec'));
+  assert.ok(argv.includes('--ephemeral'));
+  assert.ok(argv.includes('--ignore-user-config'));
+  assert.ok(argv.includes('--skip-git-repo-check'));
+  assert.deepStrictEqual(argv.slice(argv.indexOf('-m'), argv.indexOf('-m') + 2), ['-m', 'gpt-5-codex']);
+  assert.deepStrictEqual(
+    argv.slice(argv.indexOf('-c'), argv.indexOf('-c') + 2),
+    ['-c', 'model_reasoning_effort=low']
+  );
+  assert.deepStrictEqual(argv.slice(argv.indexOf('-s'), argv.indexOf('-s') + 2), ['-s', 'read-only']);
+  assert.deepStrictEqual(argv.slice(argv.indexOf('-C'), argv.indexOf('-C') + 2), ['-C', result.codexPaths.workingDir]);
+  assert.deepStrictEqual(
+    argv.slice(argv.indexOf('--output-schema'), argv.indexOf('--output-schema') + 2),
+    ['--output-schema', result.codexPaths.schemaPath]
+  );
+  assert.deepStrictEqual(argv.slice(argv.indexOf('-o'), argv.indexOf('-o') + 2), ['-o', result.codexPaths.resultPath]);
+  assert.strictEqual(argv[argv.length - 1], prompt);
+  assert.strictEqual(result.codexRecord.codexHome, '/tmp/ecc-codex-home');
+});
+
+test('start-observer propagates PROJECT_ROOT into observer environment', () => {
+  const content = fs.readFileSync(startObserverPath, 'utf8');
+  assert.match(content, /PROJECT_ROOT="\$PROJECT_ROOT"\s*\\/);
+});
+
 test('process and semantic failure guards run before archival', () => {
   const content = fs.readFileSync(observerLoopPath, 'utf8');
   const processGuardIdx = content.search(/exit_code"?\s+-ne\s+0/);
   const semanticGuardIdx = content.indexOf('if [ "$analysis_complete" -ne 1 ]');
-  const archiveIdx = content.indexOf('observations.archive');
+  const archiveIdx = content.indexOf('observations.archive', semanticGuardIdx);
   assert.ok(processGuardIdx !== -1);
   assert.ok(semanticGuardIdx !== -1);
   assert.ok(archiveIdx !== -1);

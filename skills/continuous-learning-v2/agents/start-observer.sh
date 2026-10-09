@@ -18,6 +18,24 @@ set -e
 # NOTE: set -e is disabled inside the background subshell below
 # to prevent claude CLI failures from killing the observer loop.
 
+ACTION="start"
+RESET_OBSERVER=false
+
+for arg in "$@"; do
+  case "$arg" in
+    start|stop|status)
+      ACTION="$arg"
+      ;;
+    --reset)
+      RESET_OBSERVER=true
+      ;;
+    *)
+      echo "Usage: $0 [start|stop|status] [--reset]"
+      exit 1
+      ;;
+  esac
+done
+
 # ─────────────────────────────────────────────
 # Project detection
 # ─────────────────────────────────────────────
@@ -30,6 +48,11 @@ OBSERVER_LOOP_SCRIPT="${SCRIPT_DIR}/observer-loop.sh"
 # This sets: PROJECT_ID, PROJECT_NAME, PROJECT_ROOT, PROJECT_DIR
 source "${SKILL_ROOT}/scripts/detect-project.sh"
 PYTHON_CMD="${CLV2_PYTHON_CMD:-}"
+if [ "$ACTION" = "start" ] && [ -n "$PYTHON_CMD" ]; then
+  PYTHON_CMD="$("$PYTHON_CMD" -c 'import sys; print(sys.executable)' 2>/dev/null || printf '%s\n' "$PYTHON_CMD")"
+  CLV2_PYTHON_CMD="$PYTHON_CMD"
+  export CLV2_PYTHON_CMD
+fi
 
 # ─────────────────────────────────────────────
 # Configuration
@@ -121,24 +144,6 @@ case "$UNAME_LOWER" in
   *mingw*|*msys*|*cygwin*) IS_WINDOWS=true ;;
 esac
 
-ACTION="start"
-RESET_OBSERVER=false
-
-for arg in "$@"; do
-  case "$arg" in
-    start|stop|status)
-      ACTION="$arg"
-      ;;
-    --reset)
-      RESET_OBSERVER=true
-      ;;
-    *)
-      echo "Usage: $0 [start|stop|status] [--reset]"
-      exit 1
-      ;;
-  esac
-done
-
 if [ "$RESET_OBSERVER" = "true" ]; then
   rm -f "$SENTINEL_FILE"
 fi
@@ -155,7 +160,11 @@ case "$ACTION" in
       if kill -0 "$pid" 2>/dev/null; then
         echo "Observer is running (PID: $pid)"
         echo "Log: $LOG_FILE"
-        echo "Observations: $(wc -l < "$OBSERVATIONS_FILE" 2>/dev/null || echo 0) lines"
+        observation_count=0
+        if [ -f "$OBSERVATIONS_FILE" ]; then
+          observation_count=$(wc -l < "$OBSERVATIONS_FILE" 2>/dev/null || echo 0)
+        fi
+        echo "Observations: ${observation_count} lines"
         # Count eligible files, not parsed records: the loader accepts these
         # suffixes case-insensitively and follows links to regular files.
         # Stay at the top level, excluding dot-only names with no Path.suffix.
@@ -213,10 +222,12 @@ case "$ACTION" in
       OBSERVATIONS_FILE="$OBSERVATIONS_FILE" \
       INSTINCTS_DIR="$INSTINCTS_DIR" \
       PROJECT_DIR="$PROJECT_DIR" \
+      PROJECT_ROOT="$PROJECT_ROOT" \
       PROJECT_NAME="$PROJECT_NAME" \
       PROJECT_ID="$PROJECT_ID" \
       MIN_OBSERVATIONS="$MIN_OBSERVATIONS" \
       OBSERVER_INTERVAL_SECONDS="$OBSERVER_INTERVAL_SECONDS" \
+      CLV2_PYTHON_CMD="$PYTHON_CMD" \
       CLV2_IS_WINDOWS="$IS_WINDOWS" \
       CLV2_OBSERVER_PROMPT_PATTERN="$CLV2_OBSERVER_PROMPT_PATTERN" \
       "$OBSERVER_LOOP_SCRIPT" >> "$LOG_FILE" 2>&1 &

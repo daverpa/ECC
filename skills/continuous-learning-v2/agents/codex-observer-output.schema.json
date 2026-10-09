@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Codex CLv2 Observer Output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "instincts"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "const": "analysis_complete"
+    },
+    "instincts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "trigger",
+          "domain",
+          "action",
+          "evidence"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "trigger": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "domain": {
+            "type": "string",
+            "enum": [
+              "code-style",
+              "testing",
+              "git",
+              "debugging",
+              "workflow",
+              "file-patterns",
+              "security",
+              "general-best-practices"
+            ]
+          },
+          "action": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          },
+          "evidence": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "count",
+              "session_ids",
+              "pattern",
+              "last_observed"
+            ],
+            "properties": {
+              "count": {
+                "type": "integer",
+                "minimum": 3
+              },
+              "session_ids": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                }
+              },
+              "pattern": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4000
+              },
+              "last_observed": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
