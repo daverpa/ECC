@@ -349,16 +349,25 @@ If your local Claude setup was wiped or reset, that does not mean you need to re
 
 ### Codex App and CLI
 
-Current Codex releases can install ECC as a native repo-marketplace plugin. The marketplace entry uses the repository root so Codex's cache receives the manifest together with all referenced skills, MCP configuration, hook runtime, scripts, and assets:
+Current Codex releases can install ECC as a native Git marketplace plugin. The
+maintained distribution uses the `daverpa/ECC` fork and
+`codex/clv2-native-observer` ref. Codex App executes the materialized plugin
+cache snapshot, not the development checkout. See the
+[Codex/CLv2 operations runbook](docs/codex-clv2-operations.md) for the current
+installation and verification workflow.
 
 ```bash
-codex plugin marketplace add affaan-m/ECC
+codex plugin marketplace add daverpa/ECC --ref codex/clv2-native-observer
 codex plugin add ecc@ecc
 codex plugin list --json
 node scripts/codex/check-plugin-cache.js
 ```
 
-Both add commands are idempotent. To refresh later, run `codex plugin marketplace upgrade ecc` followed by `codex plugin add ecc@ecc`. Codex stores one enabled plugin state in the active `CODEX_HOME`; it does not offer Claude's `user`, `project`, and `local` scopes. Its native hooks require an explicit trust decision and do not use Claude's four ECC hook profiles. Inside Codex, invoke `$configure-ecc` for the guided provider-aware flow.
+Both add commands are idempotent. To refresh later, run `ecc-update`. Codex
+stores one enabled plugin state in the active `CODEX_HOME`; it does not offer
+Claude's `user`, `project`, and `local` scopes. Its native hooks require an
+explicit trust decision and do not use Claude's four ECC hook profiles. Inside
+Codex, invoke `$configure-ecc` for the guided provider-aware flow.
 
 The older `scripts/sync-ecc-to-codex.sh` path is a deprecated compatibility option for users who intentionally need copied and merged configuration in `~/.codex`; it is not required for the native plugin. New sync runs write an ownership manifest so cleanup can preserve modified user files. Run Codex once first so `~/.codex/config.toml` exists, then:
 
@@ -1501,7 +1510,7 @@ ECC provides a supported native Codex marketplace plugin and repo-local configur
 
 ```bash
 # Recommended current install: add ECC's native plugin from the repo marketplace
-codex plugin marketplace add affaan-m/ECC
+codex plugin marketplace add daverpa/ECC --ref codex/clv2-native-observer
 codex plugin add ecc@ecc
 codex plugin list --json
 
@@ -1963,7 +1972,13 @@ Run the cache check from an ECC checkout:
 node scripts/codex/check-plugin-cache.js
 ```
 
-If it reports unresolved parent references, refresh the native cache with `codex plugin marketplace upgrade ecc`, run `codex plugin add ecc@ecc` again, and restart Codex. Registration in `codex plugin list` confirms the marketplace entry, while the cache check verifies that the installed manifest can resolve its skills, MCP configuration, and assets. Use `bash scripts/sync-ecc-to-codex.sh` only when you intentionally need the legacy copied-configuration compatibility path.
+If it reports unresolved parent references, run `ecc-update` and restart Codex.
+Registration in `codex plugin list` confirms the marketplace entry, while the
+cache check verifies that the installed manifest can resolve its skills, MCP
+configuration, and assets. See the
+[Codex/CLv2 operations runbook](docs/codex-clv2-operations.md) for the current
+recovery flow. Use `bash scripts/sync-ecc-to-codex.sh` only when you
+intentionally need the legacy copied-configuration compatibility path.
 </details>
 
 More answers: [TROUBLESHOOTING.md](TROUBLESHOOTING.md) covers memory, hooks, installation, performance, and common error messages. [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) tracks workarounds for open Claude Code bugs.

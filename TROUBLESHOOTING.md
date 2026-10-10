@@ -2,6 +2,11 @@
 
 Common issues and solutions for ECC plugin.
 
+For current Codex/CLv2 installation, update, cache verification, and observer
+diagnostics, use the [Codex/CLv2 operations runbook](docs/codex-clv2-operations.md).
+Always identify the failing layer first: development checkout, marketplace
+snapshot, installed plugin cache, or active Codex App runtime.
+
 ## Table of Contents
 
 - [Memory & Context Issues](#memory--context-issues)
@@ -52,13 +57,16 @@ head -n 50 large-file.txt
 
 **Solutions:**
 ```bash
-# Check if observations are being recorded
-ls ~/.claude/homunculus/projects/*/observations.jsonl
+# Check if observations are being recorded (current CLv2 default)
+ls ~/.local/share/ecc-homunculus/projects/*/observations.jsonl
+
+# Legacy Claude storage may still exist; inspect it only when migrating old data.
+ls ~/.claude/homunculus/projects/*/observations.jsonl 2>/dev/null || true
 
 # Find the current project's hash id
 python3 - <<'PY'
 import json, os
-registry_path = os.path.expanduser("~/.claude/homunculus/projects.json")
+registry_path = os.path.expanduser("~/.local/share/ecc-homunculus/projects.json")
 with open(registry_path) as f:
     registry = json.load(f)
 for project_id, meta in registry.items():
@@ -66,15 +74,15 @@ for project_id, meta in registry.items():
         print(project_id)
         break
 else:
-    raise SystemExit("Project hash not found in ~/.claude/homunculus/projects.json")
+    raise SystemExit("Project hash not found in ~/.local/share/ecc-homunculus/projects.json")
 PY
 
 # View recent observations for that project
-tail -20 ~/.claude/homunculus/projects/<project-hash>/observations.jsonl
+tail -20 ~/.local/share/ecc-homunculus/projects/<project-hash>/observations.jsonl
 
 # Back up a corrupted observations file before recreating it
-mv ~/.claude/homunculus/projects/<project-hash>/observations.jsonl \
-  ~/.claude/homunculus/projects/<project-hash>/observations.jsonl.bak.$(date +%Y%m%d-%H%M%S)
+mv ~/.local/share/ecc-homunculus/projects/<project-hash>/observations.jsonl \
+  ~/.local/share/ecc-homunculus/projects/<project-hash>/observations.jsonl.bak.$(date +%Y%m%d-%H%M%S)
 
 # Verify hooks are enabled
 grep -r "observe" ~/.claude/settings.json
@@ -345,7 +353,11 @@ plugin, not ECC — ECC never writes to `~/.config/opencode/`. Fix the model pre
 
 ---
 
-## Performance Issues
+## Performance Issues (Legacy Claude-only / migration guidance)
+
+The procedures in this section apply to the legacy Claude Code runtime. They
+are not the current Codex CLv2 storage or lifecycle procedures; use the
+[Codex/CLv2 operations runbook](docs/codex-clv2-operations.md) for those.
 
 ### Slow Response Times
 

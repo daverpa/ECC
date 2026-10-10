@@ -238,6 +238,28 @@ Edit `config.json` to control the background observer:
 
 Other behavior (observation capture, instinct thresholds, project scoping, promotion criteria) is configured via code defaults in `instinct-cli.py` and `observe.sh`.
 
+### Codex runtime operations
+
+The validated native Codex provider runs from the installed ECC plugin snapshot.
+The current environment uses `ECC_OBSERVER_PROVIDER=codex` and a configured
+`CLV2_PYTHON_CMD`; machine-specific absolute paths are environment examples,
+not portable defaults. Native hooks lazy-start the observer, and idle shutdown
+occurs only when the idle timeout expires without an active session lease. An
+active Codex session lease may intentionally keep the observer alive. There is
+no global daemon and no LaunchAgent. On macOS, sleep or suspend can make a
+process `ETIME` value look much larger than the actual execution time.
+
+Project state is stored under:
+
+```text
+~/.local/share/ecc-homunculus/projects/<project-id>
+```
+
+The local helpers `clv2-health` and `clv2-instincts` are available for
+inspection. `clv2-instinct show` is available, but `clv2-instinct remove` has
+not yet been validated as safe with respect to recursive instinct loading and
+must not be presented as a verified operational action.
+
 ### Observer platform support
 
 The background observer requires WSL2, Linux, or macOS. On native Windows

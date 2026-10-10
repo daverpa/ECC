@@ -21,11 +21,11 @@ hooks/codex-hooks.json — Codex-compatible lifecycle hook projection
 
 ## Installation
 
-Codex 0.146.0 and newer use `plugin add`, not `plugin install`. Add ECC's
-repository marketplace, install the native plugin, and verify the registration:
+Codex 0.146.0 and newer use `plugin add`, not `plugin install`. The maintained
+Codex distribution uses the ECC fork and the validated native-observer ref:
 
 ```bash
-codex plugin marketplace add affaan-m/ECC
+codex plugin marketplace add daverpa/ECC --ref codex/clv2-native-observer
 codex plugin add ecc@ecc
 codex plugin list --json
 ```
@@ -36,16 +36,22 @@ registration. To fetch a newer marketplace snapshot before applying a new ECC
 release, run:
 
 ```bash
-codex plugin marketplace upgrade ecc
-codex plugin add ecc@ecc
+ecc-update
 ```
 
-For local development, the same native journey accepts a checkout path:
+For local development and testing only, the native journey also accepts a
+checkout path:
 
 ```bash
 codex plugin marketplace add /absolute/path/to/ECC
 codex plugin add ecc@ecc
 ```
+
+The development checkout, marketplace snapshot, installed plugin cache, and
+active Codex App runtime are different layers. Codex App executes the
+materialized plugin cache, not the development checkout. See
+[`docs/codex-clv2-operations.md`](../docs/codex-clv2-operations.md) for the
+current update, verification, and CLv2 operator procedures.
 
 ECC's marketplace entry points at the repository root. Codex copies the selected
 plugin source into its cache, so the root source keeps `skills/`, `.mcp.json`,
