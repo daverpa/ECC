@@ -10,6 +10,7 @@ prompt="${4:-}"
 result_path="${5:-}"
 schema_path="${6:-}"
 working_dir="${7:-}"
+event_path="${8:-}"
 
 case "$provider" in
   claude)
@@ -39,6 +40,11 @@ case "$provider" in
       echo "codex observer working directory is required" >&2
       exit 2
     fi
+    # Keep direct callers compatible; the CLv2 loop supplies a private file.
+    # A discarded stream is safer than mixing JSONL into the structured result.
+    if [ -z "$event_path" ]; then
+      event_path="/dev/null"
+    fi
 
     codex_model_args=()
     if [ -n "$model" ]; then
@@ -50,26 +56,28 @@ case "$provider" in
         --ephemeral \
         --ignore-user-config \
         --skip-git-repo-check \
+        --json \
         "${codex_model_args[@]}" \
         -c model_reasoning_effort="low" \
         -s read-only \
         -C "$working_dir" \
         --output-schema "$schema_path" \
         -o "$result_path" \
-        "$prompt"
+        "$prompt" > "$event_path"
     fi
 
     exec codex --ask-for-approval never exec \
       --ephemeral \
       --ignore-user-config \
       --skip-git-repo-check \
+      --json \
       "${codex_model_args[@]}" \
       -c model_reasoning_effort="low" \
       -s read-only \
       -C "$working_dir" \
       --output-schema "$schema_path" \
       -o "$result_path" \
-      "$prompt"
+      "$prompt" > "$event_path"
     ;;
   *)
     echo "unsupported observer provider: ${provider:-<empty>}" >&2

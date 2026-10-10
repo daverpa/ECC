@@ -118,6 +118,34 @@ Use `clv2-health` and `clv2-instincts` for inspection. `clv2-instinct show` is
 available; `clv2-instinct remove` is not yet validated as safe with respect to
 recursive instinct loading and should not be treated as a verified operation.
 
+## Codex observer usage telemetry
+
+Successful native Codex observer analyses may append one aggregate
+`CLV2_CODEX_USAGE` record to `observer.log`. The record contains diagnostic
+payload measurements (`raw_observations`, `compacted_observations`,
+`raw_bytes`, and `compacted_bytes`) and event counts (`total_events`,
+`item_started`, `item_completed`, `command_tool_items`, `reasoning_items`,
+`message_items`, and `turn_completed_events`).
+
+When exactly one `turn.completed` event exposes usage, the following fields are
+reported when available: `input_tokens`, `cached_input_tokens`,
+`cache_write_input_tokens`, `output_tokens`, and `reasoning_output_tokens`.
+Derived values are:
+
+```text
+uncached_input_tokens = input_tokens - cached_input_tokens
+effective_tokens = uncached_input_tokens + output_tokens
+raw_total_tokens = input_tokens + output_tokens
+```
+
+`reasoning_output_tokens` is a breakdown/subset of output usage and must not be
+added again to `output_tokens`. Missing fields are reported as unavailable.
+If multiple `turn.completed` usage events appear, usage is marked
+`ambiguous_turn_completed` and no single usage value is selected; the observer
+analysis itself is unaffected. These metrics are diagnostic telemetry and must
+not automatically be interpreted as subscription, quota, or billing units
+unless OpenAI explicitly documents that equivalence.
+
 ## Troubleshooting decision tree
 
 1. Check the development checkout if the source itself is wrong.

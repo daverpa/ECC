@@ -15,6 +15,7 @@ WATCHDOG_PID=""
 ACTIVE_ANALYSIS_FILE=""
 ACTIVE_PROMPT_FILE=""
 ACTIVE_RESULT_FILE=""
+ACTIVE_EVENT_FILE=""
 RESULT_FDS_OPEN=0
 USR1_FIRED=0
 PENDING_ANALYSIS=0
@@ -102,9 +103,11 @@ cleanup_analysis_resources() {
   [ -n "$ACTIVE_ANALYSIS_FILE" ] && rm -f "$ACTIVE_ANALYSIS_FILE"
   [ -n "$ACTIVE_PROMPT_FILE" ] && rm -f "$ACTIVE_PROMPT_FILE"
   [ -n "$ACTIVE_RESULT_FILE" ] && rm -f "$ACTIVE_RESULT_FILE"
+  [ -n "$ACTIVE_EVENT_FILE" ] && rm -f "$ACTIVE_EVENT_FILE"
   ACTIVE_ANALYSIS_FILE=""
   ACTIVE_PROMPT_FILE=""
   ACTIVE_RESULT_FILE=""
+  ACTIVE_EVENT_FILE=""
 }
 
 cleanup() {
@@ -302,6 +305,7 @@ analyze_observations() {
     return
   fi
   analysis_count=$(wc -l < "$analysis_file" 2>/dev/null || echo 0)
+  raw_observation_bytes=$(wc -c < "$analysis_file" 2>/dev/null || echo 0)
   echo "[$(date)] Using last $analysis_count of $obs_count observations for analysis" >> "$LOG_FILE"
   python_cmd="${CLV2_PYTHON_CMD:-python3}"
   if ! compact_analysis_payload "$analysis_file"; then
@@ -310,6 +314,7 @@ analyze_observations() {
     return
   fi
   compacted_analysis_count=$(wc -l < "$analysis_file" 2>/dev/null || echo 0)
+  compacted_observation_bytes=$(wc -c < "$analysis_file" 2>/dev/null || echo 0)
   echo "[$(date)] Compacted analysis payload to $compacted_analysis_count records" >> "$LOG_FILE"
 
   # Claude Code resolves relative paths against the user's home directory on
@@ -465,6 +470,13 @@ PROMPT
       return
     fi
     ACTIVE_RESULT_FILE="$analysis_result_file"
+    analysis_event_file="$(mktemp "${observer_tmp_dir}/ecc-codex-observer-events.XXXXXX")"
+    if [ -z "$analysis_event_file" ] || [ ! -f "$analysis_event_file" ]; then
+      echo "[$(date)] Failed to create Codex observer event path; retaining observations for retry" >> "$LOG_FILE"
+      cleanup_analysis_resources
+      return
+    fi
+    ACTIVE_EVENT_FILE="$analysis_event_file"
     if ! rm -f "$analysis_result_file" || [ -e "$analysis_result_file" ] || [ -L "$analysis_result_file" ]; then
       echo "[$(date)] Failed to prepare Codex observer result path; retaining observations for retry" >> "$LOG_FILE"
       cleanup_analysis_resources
@@ -474,7 +486,7 @@ PROMPT
     set -m
     ECC_SKIP_OBSERVE=1 ECC_HOOK_PROFILE=minimal "${SCRIPT_DIR}/observer-provider-runner.sh" \
       "$observer_provider" "$observer_model" "$max_turns" "$prompt_content" \
-      "$analysis_result_file" "$observer_schema_file" "$observer_tmp_dir" < /dev/null >> "$LOG_FILE" 2>&1 &
+      "$analysis_result_file" "$observer_schema_file" "$observer_tmp_dir" "$analysis_event_file" < /dev/null >> "$LOG_FILE" 2>&1 &
     CLAUDE_PID=$!
     CLAUDE_PROCESS_GROUP=1
     set +m
@@ -516,6 +528,16 @@ PROMPT
       return
     fi
 
+    telemetry_line=$("$python_cmd" "${SCRIPT_DIR}/../scripts/codex-observer-telemetry.py" \
+      "$analysis_event_file" "$analysis_count" "$compacted_analysis_count" \
+      "$raw_observation_bytes" "$compacted_observation_bytes" 2>&1)
+    telemetry_status=$?
+    if [ "$telemetry_status" -eq 0 ]; then
+      echo "[$(date)] CLV2_CODEX_USAGE $telemetry_line" >> "$LOG_FILE"
+    else
+      echo "[$(date)] CLV2_CODEX_USAGE telemetry_problem=$telemetry_line raw_observations=$analysis_count compacted_observations=$compacted_analysis_count raw_bytes=$raw_observation_bytes compacted_bytes=$compacted_observation_bytes" >> "$LOG_FILE"
+    fi
+
     result_parent="$(cd "$(dirname "$analysis_result_file")" 2>/dev/null && pwd -P)"
     expected_result_parent="$(cd "$observer_tmp_dir" 2>/dev/null && pwd -P)"
     if [ ! -f "$analysis_result_file" ] || [ -L "$analysis_result_file" ] ||
@@ -533,8 +555,10 @@ PROMPT
     fi
 
     rm -f "$analysis_result_file"
+    rm -f "$analysis_event_file"
     rm -f "$analysis_file"
     ACTIVE_RESULT_FILE=""
+    ACTIVE_EVENT_FILE=""
     ACTIVE_ANALYSIS_FILE=""
 
     if [ -f "$OBSERVATIONS_FILE" ]; then
