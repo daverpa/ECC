@@ -11,6 +11,7 @@ result_path="${5:-}"
 schema_path="${6:-}"
 working_dir="${7:-}"
 event_path="${8:-}"
+prompt_path="${9:-}"
 
 case "$provider" in
   claude)
@@ -45,13 +46,29 @@ case "$provider" in
     if [ -z "$event_path" ]; then
       event_path="/dev/null"
     fi
+    if [ -n "$prompt_path" ] && [ ! -r "$prompt_path" ]; then
+      echo "codex observer prompt path is not readable" >&2
+      exit 2
+    fi
 
     codex_model_args=()
     if [ -n "$model" ]; then
       codex_model_args=(-m "$model")
     fi
 
+    codex_prompt_args=("$prompt")
+    if [ -n "$prompt_path" ]; then
+      codex_prompt_args=(-)
+    fi
+
     if [ -n "${ECC_OBSERVER_CODEX_HOME:-}" ]; then
+      if [ -n "$prompt_path" ]; then
+        exec env CODEX_HOME="$ECC_OBSERVER_CODEX_HOME" codex --ask-for-approval never exec \
+          --ephemeral --ignore-user-config --skip-git-repo-check --json \
+          "${codex_model_args[@]}" -c model_reasoning_effort="low" -s read-only \
+          -C "$working_dir" --output-schema "$schema_path" -o "$result_path" \
+          "${codex_prompt_args[@]}" < "$prompt_path" > "$event_path"
+      fi
       exec env CODEX_HOME="$ECC_OBSERVER_CODEX_HOME" codex --ask-for-approval never exec \
         --ephemeral \
         --ignore-user-config \
@@ -66,6 +83,13 @@ case "$provider" in
         "$prompt" > "$event_path"
     fi
 
+    if [ -n "$prompt_path" ]; then
+      exec codex --ask-for-approval never exec \
+        --ephemeral --ignore-user-config --skip-git-repo-check --json \
+        "${codex_model_args[@]}" -c model_reasoning_effort="low" -s read-only \
+        -C "$working_dir" --output-schema "$schema_path" -o "$result_path" \
+        "${codex_prompt_args[@]}" < "$prompt_path" > "$event_path"
+    fi
     exec codex --ask-for-approval never exec \
       --ephemeral \
       --ignore-user-config \
