@@ -740,6 +740,19 @@ async function runTests() {
         }
       );
 
+      // The lease validator intentionally requires the owning process to be
+      // alive. Keep this fixture's unrelated lease live for the SessionEnd
+      // precedence assertion.
+      const leaseDir = path.join(
+        homunculusEnv.homunculusDir,
+        'projects',
+        fs.readdirSync(path.join(homunculusEnv.homunculusDir, 'projects'))[0],
+        '.observer-sessions'
+      );
+      const envLeaseFile = path.join(leaseDir, `${envSessionId}.json`);
+      const envLease = JSON.parse(fs.readFileSync(envLeaseFile, 'utf8'));
+      fs.writeFileSync(envLeaseFile, JSON.stringify({ ...envLease, pid: process.pid }));
+
       const result = await runHookWithInput(
         path.join(scriptsDir, 'session-end-marker.js'),
         { session_id: payloadSessionId, hook_event_name: 'SessionEnd' },

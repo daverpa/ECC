@@ -141,11 +141,8 @@ file_mtime_epoch() {
 }
 
 has_active_session_leases() {
-  if [ ! -d "$SESSION_LEASE_DIR" ]; then
-    return 1
-  fi
-
-  find "$SESSION_LEASE_DIR" -type f -name '*.json' -print -quit 2>/dev/null | grep -q .
+  node "${SCRIPT_DIR}/../../../scripts/lib/observer-sessions.js" \
+    --has-active-leases "$SESSION_LEASE_DIR" >/dev/null 2>&1
 }
 
 latest_activity_epoch() {

@@ -165,9 +165,44 @@ function removeSessionLease(context, rawSessionId = process.env.CLAUDE_SESSION_I
 function listSessionLeases(context) {
   const leaseDir = getSessionLeaseDir(context);
   if (!fs.existsSync(leaseDir)) return [];
-  return fs.readdirSync(leaseDir)
-    .filter(name => name.endsWith('.json'))
-    .map(name => path.join(leaseDir, name));
+
+  const activeLeases = [];
+  for (const name of fs.readdirSync(leaseDir)) {
+    if (!name.endsWith('.json')) continue;
+
+    const leaseFile = path.join(leaseDir, name);
+    let lease;
+    try {
+      lease = JSON.parse(fs.readFileSync(leaseFile, 'utf8'));
+    } catch {
+      try { fs.rmSync(leaseFile, { force: true }); } catch { /* best effort */ }
+      continue;
+    }
+
+    const pid = lease && lease.pid;
+    if (!Number.isInteger(pid) || pid <= 1 || !Number.isSafeInteger(pid)) {
+      try { fs.rmSync(leaseFile, { force: true }); } catch { /* best effort */ }
+      continue;
+    }
+
+    try {
+      process.kill(pid, 0);
+      activeLeases.push(leaseFile);
+    } catch (error) {
+      // EPERM means the process exists but is not signalable by this user.
+      if (error && error.code === 'EPERM') {
+        activeLeases.push(leaseFile);
+      } else {
+        try { fs.rmSync(leaseFile, { force: true }); } catch { /* best effort */ }
+      }
+    }
+  }
+
+  return activeLeases;
+}
+
+function hasActiveSessionLeases(context) {
+  return listSessionLeases(context).length > 0;
 }
 
 function stopObserverForContext(context) {
@@ -208,6 +243,13 @@ module.exports = {
   writeSessionLease,
   removeSessionLease,
   listSessionLeases,
+  hasActiveSessionLeases,
   stopObserverForContext,
   resolveSessionId
 };
+
+if (require.main === module && process.argv[2] === '--has-active-leases') {
+  const leaseDir = process.argv[3];
+  const context = { projectDir: path.dirname(leaseDir || '') };
+  process.exitCode = leaseDir && hasActiveSessionLeases(context) ? 0 : 1;
+}
