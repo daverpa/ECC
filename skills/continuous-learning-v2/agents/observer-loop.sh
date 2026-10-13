@@ -255,6 +255,51 @@ PY
   fi
 }
 
+analysis_char_budget() {
+  local budget="${ECC_OBSERVER_MAX_ANALYSIS_CHARS:-950000}"
+  case "$budget" in
+    ''|*[!0-9]*) budget=950000 ;;
+  esac
+  if [ "$budget" -eq 0 ]; then
+    budget=950000
+  fi
+  printf '%s\n' "$budget"
+}
+
+limit_analysis_payload() {
+  local source_file="$1"
+  local max_chars="$2"
+  local limited_file
+  local analysis_python_cmd="${CLV2_COMPACTION_PYTHON_CMD:-$python_cmd}"
+  limited_file="$(mktemp "${observer_tmp_dir}/ecc-observer-limited.XXXXXX")" || return 1
+
+  if ! "$analysis_python_cmd" - "$source_file" "$max_chars" > "$limited_file" <<'LIMIT_PY'
+import sys
+
+source, budget = sys.argv[1], int(sys.argv[2])
+with open(source, encoding="utf-8") as handle:
+    records = [line for line in handle if line.strip()]
+
+selected = []
+remaining = budget
+for record in reversed(records):
+    record_chars = len(record)
+    if record_chars <= remaining:
+        selected.append(record)
+        remaining -= record_chars
+
+sys.stdout.write("".join(reversed(selected)))
+LIMIT_PY
+  then
+    rm -f "$limited_file"
+    return 1
+  fi
+  if ! mv "$limited_file" "$source_file"; then
+    rm -f "$limited_file"
+    return 1
+  fi
+}
+
 build_existing_instinct_context() {
   local instincts_dir="${INSTINCTS_DIR:-}"
   if [ -z "$instincts_dir" ] || [ ! -d "$instincts_dir" ]; then
@@ -391,9 +436,19 @@ analyze_observations() {
     cleanup_analysis_resources
     return
   fi
-  compacted_analysis_count=$(wc -l < "$analysis_file" 2>/dev/null || echo 0)
-  compacted_observation_bytes=$(wc -c < "$analysis_file" 2>/dev/null || echo 0)
-  echo "[$(date)] Compacted analysis payload to $compacted_analysis_count records" >> "$LOG_FILE"
+  compacted_candidate_count=$(wc -l < "$analysis_file" 2>/dev/null || echo 0)
+  compacted_candidate_bytes=$(wc -c < "$analysis_file" 2>/dev/null || echo 0)
+  MAX_ANALYSIS_CHARS="$(analysis_char_budget)"
+  if ! limit_analysis_payload "$analysis_file" "$MAX_ANALYSIS_CHARS"; then
+    echo "[$(date)] Failed to apply observer character budget; retaining observations for retry" >> "$LOG_FILE"
+    cleanup_analysis_resources
+    return
+  fi
+  compacted_analysis_count="$compacted_candidate_count"
+  compacted_observation_bytes="$compacted_candidate_bytes"
+  selected_analysis_count=$(wc -l < "$analysis_file" 2>/dev/null || echo 0)
+  selected_observation_bytes=$(wc -c < "$analysis_file" 2>/dev/null || echo 0)
+  echo "[$(date)] Compacted analysis payload candidate=${compacted_candidate_count} records/${compacted_candidate_bytes} bytes selected=${selected_analysis_count} records/${selected_observation_bytes} bytes budget=${MAX_ANALYSIS_CHARS} chars" >> "$LOG_FILE"
 
   # Claude Code resolves relative paths against the user's home directory on
   # macOS/Linux, even though the observer changes to PROJECT_DIR first. Use

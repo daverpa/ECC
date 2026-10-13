@@ -52,6 +52,33 @@ function runExistingInstinctContext(instinctsDir) {
   return JSON.parse(result.stdout);
 }
 
+function runAnalysisPayloadHelper(helper, input, budget) {
+  const testDir = createTempDir();
+  const source = path.join(testDir, 'analysis.jsonl');
+  fs.writeFileSync(source, input);
+  try {
+    const result = spawnSync(
+      'bash',
+      ['-c', `source "$1"; observer_tmp_dir="$2"; python_cmd=python3; ${helper} "$3" "${budget ?? ''}"`, 'bash', observerLoopPath, testDir, source],
+      { encoding: 'utf8' }
+    );
+    assert.strictEqual(result.status, 0, `${helper} failed: ${result.stderr}`);
+    return fs.readFileSync(source, 'utf8');
+  } finally {
+    cleanupDir(testDir);
+  }
+}
+
+function runAnalysisCharBudget(value) {
+  const result = spawnSync(
+    'bash',
+    ['-c', 'source "$1"; ECC_OBSERVER_MAX_ANALYSIS_CHARS="$2"; analysis_char_budget', 'bash', observerLoopPath, value],
+    { encoding: 'utf8' }
+  );
+  assert.strictEqual(result.status, 0, `analysis_char_budget failed: ${result.stderr}`);
+  return result.stdout.trim();
+}
+
 const repoRoot = path.resolve(__dirname, '..', '..');
 const observeShPath = path.join(repoRoot, 'skills', 'continuous-learning-v2', 'hooks', 'observe.sh');
 const observerLoopPath = path.join(repoRoot, 'skills', 'continuous-learning-v2', 'agents', 'observer-loop.sh');
@@ -382,6 +409,36 @@ test('existing-instinct catalog returns an empty array for a missing directory',
   } finally {
     cleanupDir(path.dirname(testDir));
   }
+});
+
+test('compacted character budget preserves complete records below the budget', () => {
+  const input = ['A', 'B', 'C'].map((id) => `${JSON.stringify({ id })}\n`).join('');
+  assert.strictEqual(runAnalysisPayloadHelper('limit_analysis_payload', input, 1000), input);
+});
+
+test('compacted character budget keeps recent complete records in chronological order', () => {
+  const input = ['A', 'B', 'C', 'D'].map((id) => `${JSON.stringify({ id, payload: '123456' })}\n`).join('');
+  const records = input.trimEnd().split('\n').map((line) => `${line}\n`);
+  const budget = Buffer.byteLength(records[2] + records[3], 'utf8');
+  assert.strictEqual(runAnalysisPayloadHelper('limit_analysis_payload', input, budget), records[2] + records[3]);
+});
+
+test('compacted character budget omits an oversized newest record and retains older fits', () => {
+  const records = ['A', 'B', 'C'].map((id) => `${JSON.stringify({ id, payload: id === 'C' ? 'x'.repeat(80) : '123456' })}\n`);
+  const budget = Buffer.byteLength(records[0] + records[1], 'utf8');
+  assert.strictEqual(runAnalysisPayloadHelper('limit_analysis_payload', records.join(''), budget), records[0] + records[1]);
+});
+
+test('compacted character budget preserves compaction metadata byte-for-byte', () => {
+  const record = `${JSON.stringify({ id: 'repeat', _compaction: { raw_occurrences: 7, sessions: ['s1', 's2'] } })}\n`;
+  assert.strictEqual(runAnalysisPayloadHelper('limit_analysis_payload', record, record.length), record);
+});
+
+test('invalid compacted character budgets fall back to 950000', () => {
+  for (const value of ['', 'not-a-number', '0', '-1']) {
+    assert.strictEqual(runAnalysisCharBudget(value), '950000', `invalid value ${value} should use the default`);
+  }
+  assert.strictEqual(runAnalysisCharBudget('1234'), '1234');
 });
 
 test('Codex runner supports stdin prompt mode while retaining legacy argv mode', () => {
