@@ -1469,13 +1469,6 @@ def test_cmd_prune_empty_pending_nothing_to_do(monkeypatch, capsys):
 def _analysis(instincts=None, status="analysis_complete"):
     return json.dumps({
         "status": status,
-        "project_id": "evil",
-        "project_name": "evil",
-        "source": "evil",
-        "scope": "global",
-        "destination": "/tmp/evil",
-        "filename": "../evil.md",
-        "confidence": 0.99,
         "instincts": instincts if instincts is not None else [_ingest_instinct()],
     })
 
@@ -1486,11 +1479,6 @@ def _ingest_instinct(instinct_id="prefer-tests", count=3, domain="testing", last
         "trigger": "when adding behavior",
         "domain": domain,
         "action": "Write the focused test first.",
-        "confidence": 0.01,
-        "source": "model-supplied",
-        "scope": "global",
-        "project_id": "wrong",
-        "project_name": "wrong",
         "evidence": {
             "count": count,
             "pattern": "user asks for TDD repeatedly",
@@ -1509,7 +1497,7 @@ def _result_file(project, content):
 def _run_ingest(project, monkeypatch, result=None, dry_run=False):
     monkeypatch.setattr(_mod, "detect_project", lambda persist=True: project)
     result_path = result
-    if result is None or (isinstance(result, str) and not Path(result).exists()):
+    if result is None or (isinstance(result, str) and result.lstrip().startswith("{")):
         result_path = _result_file(project, result or _analysis())
     return cmd_ingest(SimpleNamespace(result=str(result_path), dry_run=dry_run))
 
@@ -1535,6 +1523,15 @@ def test_ingest_reads_result_from_json_file(patch_globals, monkeypatch):
     result = _result_file(project, _analysis([_ingest_instinct(instinct_id="from-file")]))
     assert _run_ingest(project, monkeypatch, result=result) == 0
     assert (project["instincts_personal"] / "from-file.md").exists()
+
+
+def test_ingest_rejects_host_derived_fields_in_model_payload(patch_globals, monkeypatch):
+    project = _make_project(patch_globals)
+    instinct = _ingest_instinct()
+    instinct.update({"confidence": 0.99, "project_id": "wrong", "filename": "evil.md"})
+
+    assert _run_ingest(project, monkeypatch, result=_analysis([instinct])) == 1
+    assert not list(project["instincts_personal"].glob("*.md"))
 
 
 def test_ingest_rejects_nonexistent_result_file(patch_globals, monkeypatch):
@@ -1658,7 +1655,8 @@ def test_ingest_dry_run_creates_no_project_storage_lock_or_registry_side_effects
     project["project_dir"].rmdir()
     monkeypatch.setattr(_mod, "detect_project", lambda persist=True: project)
 
-    assert cmd_ingest(SimpleNamespace(result=str(result), dry_run=True)) == 0
+    # Dry-run still validates the target without creating project storage.
+    assert cmd_ingest(SimpleNamespace(result=str(result), dry_run=True)) == 1
     assert not project["project_dir"].exists()
     assert not patch_globals["registry_file"].exists()
 
