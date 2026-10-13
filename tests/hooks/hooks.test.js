@@ -694,6 +694,142 @@ async function runTests() {
   else failed++;
 
   if (
+    await asyncTest('preserves default instinct injection and records a knowledge manifest', async () => {
+      const isoHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-knowledge-manifest-'));
+      const homunculusDir = path.join(isoHome, 'homunculus');
+      const instinctsDir = path.join(homunculusDir, 'instincts', 'personal');
+      fs.mkdirSync(instinctsDir, { recursive: true });
+      fs.writeFileSync(path.join(instinctsDir, 'first.md'), '---\nid: manifest-first\nconfidence: 0.9\n---\n## Action\nUse the focused test first.\n');
+      fs.writeFileSync(path.join(instinctsDir, 'second.md'), '---\nid: manifest-second\nconfidence: 0.8\n---\n## Action\nKeep the change local.\n');
+
+      try {
+        const result = await runScript(path.join(scriptsDir, 'session-start.js'), JSON.stringify({ session_id: 'manifest-session', hook_event_name: 'SessionStart', source: 'startup' }), {
+          HOME: isoHome,
+          USERPROFILE: isoHome,
+          ECC_AGENT_DATA_HOME: path.join(isoHome, '.claude'),
+          CLV2_HOMUNCULUS_DIR: homunculusDir,
+        });
+        assert.strictEqual(result.code, 0);
+        assert.ok(getSessionStartAdditionalContext(result.stdout).includes('Active instincts:'));
+        const manifestFiles = fs.readdirSync(path.join(homunculusDir, 'knowledge-manifests'));
+        assert.strictEqual(manifestFiles.length, 1);
+        const manifestPath = path.join(homunculusDir, 'knowledge-manifests', manifestFiles[0]);
+        const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+        assert.strictEqual(manifest.session_id, 'manifest-session');
+        assert.ok(typeof manifest.project_id === 'string' && manifest.project_id.length > 0);
+        assert.strictEqual(manifest.knowledge_enabled, true);
+        assert.deepStrictEqual(manifest.selected_instincts.map(instinct => instinct.id), ['manifest-first', 'manifest-second']);
+        assert.deepStrictEqual(manifest.selected_instincts.map(instinct => instinct.scope), ['global', 'global']);
+        assert.deepStrictEqual(manifest.selected_instincts.map(instinct => instinct.confidence), [0.9, 0.8]);
+        assert.deepStrictEqual(manifest.selected_instincts.map(instinct => instinct.score), [0.9, 0.8]);
+        const repeated = await runScript(path.join(scriptsDir, 'session-start.js'), JSON.stringify({ session_id: 'manifest-session', hook_event_name: 'SessionStart', source: 'startup' }), {
+          HOME: isoHome,
+          USERPROFILE: isoHome,
+          ECC_AGENT_DATA_HOME: path.join(isoHome, '.claude'),
+          CLV2_HOMUNCULUS_DIR: homunculusDir,
+        });
+        assert.strictEqual(repeated.code, 0);
+        assert.strictEqual(fs.readdirSync(path.join(homunculusDir, 'knowledge-manifests')).length, 2);
+      } finally {
+        fs.rmSync(isoHome, { recursive: true, force: true });
+      }
+    })
+  )
+    passed++;
+  else failed++;
+
+  if (
+    await asyncTest('disables only CLv2 instinct injection with ECC_SESSION_START_INSTINCTS=off', async () => {
+      const isoHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-instincts-off-'));
+      const homunculusDir = path.join(isoHome, 'homunculus');
+      const instinctsDir = path.join(homunculusDir, 'instincts', 'personal');
+      const sessionsDir = getLegacySessionsDir(isoHome);
+      fs.mkdirSync(instinctsDir, { recursive: true });
+      fs.mkdirSync(sessionsDir, { recursive: true });
+      fs.writeFileSync(path.join(instinctsDir, 'off.md'), '---\nid: should-not-inject\nconfidence: 0.9\n---\n## Action\nDo not show this instinct.\n');
+      fs.writeFileSync(path.join(sessionsDir, '2026-02-11-instincts-off-session.tmp'), buildSessionStartFixture('OTHER_SESSION_CONTEXT'));
+
+      try {
+        const result = await runScript(path.join(scriptsDir, 'session-start.js'), '', {
+          HOME: isoHome,
+          USERPROFILE: isoHome,
+          ECC_AGENT_DATA_HOME: path.join(isoHome, '.claude'),
+          CLV2_HOMUNCULUS_DIR: homunculusDir,
+          ECC_SESSION_START_INSTINCTS: 'off',
+        });
+        assert.strictEqual(result.code, 0);
+        const context = getSessionStartAdditionalContext(result.stdout);
+        assert.ok(!context.includes('Active instincts:'));
+        assert.ok(context.includes('OTHER_SESSION_CONTEXT'));
+        const manifestFiles = fs.readdirSync(path.join(homunculusDir, 'knowledge-manifests'));
+        const manifest = JSON.parse(fs.readFileSync(path.join(homunculusDir, 'knowledge-manifests', manifestFiles[0]), 'utf8'));
+        assert.strictEqual(manifest.knowledge_enabled, false);
+        assert.strictEqual(manifest.selected_instinct_count, 0);
+        assert.deepStrictEqual(manifest.selected_instincts, []);
+      } finally {
+        fs.rmSync(isoHome, { recursive: true, force: true });
+      }
+    })
+  )
+    passed++;
+  else failed++;
+
+  if (
+    await asyncTest('records final context size separately from selected instinct text when truncated', async () => {
+      const isoHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-knowledge-truncation-'));
+      const homunculusDir = path.join(isoHome, 'homunculus');
+      const instinctsDir = path.join(homunculusDir, 'instincts', 'personal');
+      fs.mkdirSync(instinctsDir, { recursive: true });
+      fs.writeFileSync(path.join(instinctsDir, 'truncate.md'), '---\nid: truncate-instinct\nconfidence: 0.9\n---\n## Action\nUse this very long action text to force final SessionStart context truncation.\n');
+      try {
+        const result = await runScript(path.join(scriptsDir, 'session-start.js'), JSON.stringify({ session_id: 'truncate/session', hook_event_name: 'SessionStart', source: 'startup' }), {
+          HOME: isoHome,
+          USERPROFILE: isoHome,
+          ECC_AGENT_DATA_HOME: path.join(isoHome, '.claude'),
+          CLV2_HOMUNCULUS_DIR: homunculusDir,
+          ECC_SESSION_START_MAX_CHARS: '35',
+        });
+        assert.strictEqual(result.code, 0);
+        const context = getSessionStartAdditionalContext(result.stdout);
+        assert.strictEqual(context.length, 35);
+        const manifestFiles = fs.readdirSync(path.join(homunculusDir, 'knowledge-manifests'));
+        const manifest = JSON.parse(fs.readFileSync(path.join(homunculusDir, 'knowledge-manifests', manifestFiles[0]), 'utf8'));
+        assert.strictEqual(manifest.session_id, 'truncate-session');
+        assert.strictEqual(manifest.total_additional_context_chars, context.length);
+        assert.ok(manifest.selected_instinct_context_chars > manifest.total_additional_context_chars);
+      } finally {
+        fs.rmSync(isoHome, { recursive: true, force: true });
+      }
+    })
+  )
+    passed++;
+  else failed++;
+
+  if (
+    await asyncTest('keeps SessionStart successful when knowledge manifest writing fails', async () => {
+      const isoHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-knowledge-write-failure-'));
+      const blockedHomunculusPath = path.join(isoHome, 'homunculus');
+      fs.mkdirSync(blockedHomunculusPath, { recursive: true });
+      fs.writeFileSync(path.join(blockedHomunculusPath, 'knowledge-manifests'), 'not a directory');
+      try {
+        const result = await runScript(path.join(scriptsDir, 'session-start.js'), '', {
+          HOME: isoHome,
+          USERPROFILE: isoHome,
+          ECC_AGENT_DATA_HOME: path.join(isoHome, '.claude'),
+          CLV2_HOMUNCULUS_DIR: blockedHomunculusPath,
+        });
+        assert.strictEqual(result.code, 0);
+        assert.strictEqual(typeof getSessionStartAdditionalContext(result.stdout), 'string');
+        assert.ok(result.stderr.includes('failed to write knowledge manifest'));
+      } finally {
+        fs.rmSync(isoHome, { recursive: true, force: true });
+      }
+    })
+  )
+    passed++;
+  else failed++;
+
+  if (
     await asyncTest('disables session-start additional context when requested', async () => {
       const isoHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-disabled-start-'));
       const sessionsDir = getLegacySessionsDir(isoHome);

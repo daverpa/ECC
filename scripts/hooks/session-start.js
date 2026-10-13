@@ -20,7 +20,8 @@ const {
   ensureDir,
   readFile,
   stripAnsi,
-  log
+  log,
+  sanitizeSessionId
 } = require('../lib/utils');
 const { resolveProjectContext, writeSessionLease, resolveSessionId, getHomunculusDir } = require('../lib/observer-sessions');
 const { getPackageManager, getSelectionPrompt } = require('../lib/package-manager');
@@ -112,6 +113,11 @@ function getSessionRetentionDays() {
 
 function isSessionStartContextDisabled() {
   const raw = String(process.env.ECC_SESSION_START_CONTEXT || '').trim().toLowerCase();
+  return ['0', 'false', 'off', 'none', 'disabled'].includes(raw);
+}
+
+function isSessionStartInstinctsDisabled() {
+  const raw = String(process.env.ECC_SESSION_START_INSTINCTS || '').trim().toLowerCase();
   return ['0', 'false', 'off', 'none', 'disabled'].includes(raw);
 }
 
@@ -514,7 +520,7 @@ function summarizeActiveInstincts(observerContext) {
     .slice(0, maxInjected);
 
   if (ranked.length === 0) {
-    return '';
+    return { text: '', selectedInstincts: [] };
   }
 
   log(`[SessionStart] Injecting ${ranked.length} instinct(s) into session context`);
@@ -525,7 +531,50 @@ function summarizeActiveInstincts(observerContext) {
     return `- [${scope} ${confidence}] ${instinct.action}`;
   });
 
-  return `Active instincts:\n${lines.join('\n')}`;
+  return {
+    text: `Active instincts:\n${lines.join('\n')}`,
+    selectedInstincts: ranked.map(instinct => ({
+      id: instinct.id,
+      scope: instinct._scopeLabel === 'project' ? 'project' : 'global',
+      confidence: instinct.confidence,
+      score: instinct.confidence + instinct._relevance,
+    })),
+  };
+}
+
+function writeKnowledgeManifest({ observerContext, observerSessionId, sessionStartMode, knowledgeEnabled, selectedInstincts, instinctContextChars, totalAdditionalContextChars }) {
+  try {
+    const manifestDir = path.join(getHomunculusDir(), 'knowledge-manifests');
+    ensureDir(manifestDir);
+    const timestamp = new Date().toISOString();
+    const filenameId = sanitizeSessionId(observerSessionId || '') || `session-${Date.now()}-${process.pid}`;
+    const eventTimestamp = timestamp.replace(/[-:.TZ]/g, '');
+    const manifest = {
+      timestamp,
+      session_id: observerSessionId || '',
+      project_id: observerContext.projectId,
+      session_start_mode: sessionStartMode || 'startup',
+      knowledge_enabled: knowledgeEnabled,
+      selected_instinct_count: selectedInstincts.length,
+      selected_instincts: selectedInstincts,
+      selected_instinct_context_chars: instinctContextChars,
+      total_additional_context_chars: totalAdditionalContextChars,
+    };
+    const contents = `${JSON.stringify(manifest, null, 2)}\n`;
+    const baseName = `${filenameId}-${eventTimestamp}-knowledge-manifest`;
+    for (let suffix = 0; suffix < 1000; suffix += 1) {
+      const suffixText = suffix === 0 ? '' : `-${suffix}`;
+      try {
+        fs.writeFileSync(path.join(manifestDir, `${baseName}${suffixText}.json`), contents, { encoding: 'utf8', flag: 'wx' });
+        return;
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+      }
+    }
+    throw new Error('could not allocate a unique manifest filename');
+  } catch (error) {
+    log(`[SessionStart] Warning: failed to write knowledge manifest: ${error.message}`);
+  }
 }
 
 function stripMarkdownInline(value) {
@@ -651,7 +700,9 @@ async function main() {
   const observerContext = resolveProjectContext();
   const maxContextChars = getSessionStartMaxContextChars();
   const explicitContextDisabled = isSessionStartContextDisabled();
+  const explicitInstinctsDisabled = isSessionStartInstinctsDisabled();
   const shouldInjectContext = !explicitContextDisabled && maxContextChars !== 0;
+  let instinctResult = { text: '', selectedInstincts: [] };
   const sessionStartMode = hookPayload
     ? getSessionStartModeFromPayload(hookPayload)
     : (stdinPayload.trim() ? SESSION_START_MODE_INVALID : null);
@@ -689,9 +740,14 @@ async function main() {
   }
 
   if (shouldInjectContext) {
-    const instinctSummary = summarizeActiveInstincts(observerContext);
-    if (instinctSummary) {
-      additionalContextParts.push(instinctSummary);
+    instinctResult = explicitInstinctsDisabled
+      ? { text: '', selectedInstincts: [] }
+      : summarizeActiveInstincts(observerContext);
+    if (explicitInstinctsDisabled) {
+      log('[SessionStart] CLv2 instinct injection disabled by ECC_SESSION_START_INSTINCTS');
+    }
+    if (instinctResult.text) {
+      additionalContextParts.push(instinctResult.text);
     }
 
     if (sessionStartMode && sessionStartMode !== 'startup') {
@@ -803,6 +859,15 @@ async function main() {
   const additionalContext = shouldInjectContext
     ? limitSessionStartContext(additionalContextParts.join('\n\n'), maxContextChars)
     : '';
+  writeKnowledgeManifest({
+    observerContext,
+    observerSessionId,
+    sessionStartMode,
+    knowledgeEnabled: shouldInjectContext && !explicitInstinctsDisabled,
+    selectedInstincts: shouldInjectContext && !explicitInstinctsDisabled ? instinctResult.selectedInstincts : [],
+    instinctContextChars: shouldInjectContext && !explicitInstinctsDisabled ? instinctResult.text.length : 0,
+    totalAdditionalContextChars: additionalContext.length,
+  });
   await writeSessionStartPayload(additionalContext);
 }
 
