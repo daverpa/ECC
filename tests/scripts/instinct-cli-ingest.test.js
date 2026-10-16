@@ -44,7 +44,7 @@ function payload(ids, count = 11) {
     status: 'analysis_complete',
     instincts: ids.map(id => ({
       id, trigger: `when ${id}`, domain: 'workflow', action: `Do ${id}.`,
-      evidence: { count, pattern: `Pattern ${id}`, last_observed: '2026-01-02T00:00:00Z', session_ids: ['s1'] },
+      evidence: { count, pattern: `Pattern ${id}`, last_observed: '2026-01-02T00:00:00Z', session_ids: ['s1', 's2', 's3'] },
     })),
   };
 }

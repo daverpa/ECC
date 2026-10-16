@@ -1612,6 +1612,53 @@ def test_ingest_confidence_from_count(patch_globals, monkeypatch, count, expecte
     assert _read_personal(project)["confidence"] == expected
 
 
+@pytest.mark.parametrize(
+    "count, session_ids, expected",
+    [
+        (3, ["s1"], 0.5),
+        (6, ["s1"], 0.5),
+        (6, ["s1", "s2"], 0.7),
+        (11, ["s1"], 0.5),
+        (11, ["s1", "s2"], 0.7),
+        (11, ["s1", "s2", "s3"], 0.85),
+    ],
+)
+def test_ingest_confidence_requires_independent_sessions(
+    patch_globals, monkeypatch, count, session_ids, expected
+):
+    project = _make_project(patch_globals, pid=f"proj-{count}-{'-'.join(session_ids)}")
+    instinct = _ingest_instinct(count=count)
+    instinct["evidence"]["session_ids"] = session_ids
+    assert _run_ingest(project, monkeypatch, result=_analysis([instinct])) == 0
+    assert _read_personal(project)["confidence"] == expected
+
+
+def test_ingest_deduplicates_session_ids_without_inflating_confidence(patch_globals, monkeypatch):
+    project = _make_project(patch_globals)
+    instinct = _ingest_instinct(count=6)
+    instinct["evidence"]["session_ids"] = ["s1", "s2", "s1", "s2"]
+    assert _run_ingest(project, monkeypatch, result=_analysis([instinct])) == 0
+    persisted = _read_personal(project)
+    assert persisted["confidence"] == 0.7
+    content = (project["instincts_personal"] / "prefer-tests.md").read_text(encoding="utf-8")
+    assert "- Sessions: s1, s2\n" in content
+
+
+@pytest.mark.parametrize(
+    "session_ids, error",
+    [
+        ([], "at least one unique session"),
+        (["s1", "s2", "s3", "s4"], "more unique sessions than evidence.count"),
+    ],
+)
+def test_ingest_rejects_invalid_session_diversity(patch_globals, monkeypatch, session_ids, error):
+    project = _make_project(patch_globals)
+    instinct = _ingest_instinct(count=3)
+    instinct["evidence"]["session_ids"] = session_ids
+    assert _run_ingest(project, monkeypatch, result=_analysis([instinct])) == 1
+    assert not list(project["instincts_personal"].glob("*.md"))
+
+
 def test_ingest_updates_higher_confidence(patch_globals, monkeypatch):
     project = _make_project(patch_globals)
     assert _run_ingest(project, monkeypatch, result=_analysis([_ingest_instinct(count=3)])) == 0

@@ -1098,14 +1098,16 @@ def cmd_import(args) -> int:
     return 0
 
 
-def _ingest_confidence(count: int) -> float:
+def _ingest_confidence(count: int, unique_session_count: int) -> float:
     if count < 3:
         raise ValueError("evidence.count must be >= 3")
-    if count <= 5:
-        return 0.5
-    if count <= 10:
+    if unique_session_count >= 3 and count >= 11:
+        return 0.85
+    if unique_session_count >= 2 and count >= 6:
         return 0.7
-    return 0.85
+    if unique_session_count >= 1:
+        return 0.5
+    raise ValueError("evidence.session_ids must contain at least one unique session")
 
 
 def _human_title(instinct_id: str) -> str:
@@ -1236,14 +1238,19 @@ def _validate_ingest_payload(raw: str) -> list[dict]:
         count = evidence["count"]
         if not isinstance(count, int) or isinstance(count, bool):
             raise ValueError("evidence.count must be an integer")
-        confidence = _ingest_confidence(count)
         session_ids = evidence["session_ids"]
         if not isinstance(session_ids, list):
             raise ValueError("evidence.session_ids must be an array of strings")
-        session_ids = [
+        normalized_session_ids = [
             _validate_model_text(item, "evidence.session_ids[]", max_length=128, single_line=True)
             for item in session_ids
         ]
+        session_ids = list(dict.fromkeys(normalized_session_ids))
+        if not session_ids:
+            raise ValueError("evidence.session_ids must contain at least one unique session")
+        if len(session_ids) > count:
+            raise ValueError("evidence.session_ids cannot contain more unique sessions than evidence.count")
+        confidence = _ingest_confidence(count, len(session_ids))
         trigger = _validate_model_text(instinct["trigger"], "trigger", max_length=500, single_line=True)
         action = _validate_model_text(instinct["action"], "action", max_length=8000)
         pattern = _validate_model_text(evidence["pattern"], "evidence.pattern", max_length=2000)
