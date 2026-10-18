@@ -346,6 +346,8 @@ function runProviderRunner(options = {}) {
     codexHome = '',
     model = provider === 'codex' ? 'gpt-5-codex' : 'haiku',
     prompt = 'prompt',
+    promptPath = false,
+    reasoningEffort = undefined,
   } = options;
   const sandbox = createTempDir();
 
@@ -377,8 +379,10 @@ function runProviderRunner(options = {}) {
     const resultPath = path.join(sandbox, 'result.json');
     const schemaPath = path.join(sandbox, 'schema.json');
     const workingDir = path.join(sandbox, 'work');
+    const promptPathFile = path.join(sandbox, 'prompt.txt');
     fs.writeFileSync(schemaPath, '{}');
     fs.mkdirSync(workingDir, { recursive: true });
+    if (promptPath) fs.writeFileSync(promptPathFile, prompt);
 
     const env = {
       ...process.env,
@@ -386,10 +390,19 @@ function runProviderRunner(options = {}) {
       CLAUDE_STUB_EXIT: String(claudeExitCode),
       CODEX_RECORD_PATH: codexRecord,
     };
+    delete env.ECC_OBSERVER_CODEX_REASONING_EFFORT;
+    if (reasoningEffort !== undefined) {
+      env.ECC_OBSERVER_CODEX_REASONING_EFFORT = reasoningEffort;
+    }
+    delete env.ECC_OBSERVER_CODEX_HOME;
     if (codexHome) env.ECC_OBSERVER_CODEX_HOME = codexHome;
 
     const args = provider === 'codex'
-      ? [observerProviderRunnerPath, provider, model, '20', prompt, resultPath, schemaPath, workingDir]
+      ? [
+        observerProviderRunnerPath, provider, model, '20', prompt,
+        resultPath, schemaPath, workingDir,
+        ...(promptPath ? ['/dev/null', promptPathFile] : []),
+      ]
       : [observerProviderRunnerPath, provider, model, '20', prompt];
     const result = spawnSync(
       'bash',
@@ -663,8 +676,50 @@ test('claude observer provider preserves exit code', () => {
   assert.strictEqual(result.status, 17);
 });
 
-test('codex observer provider command contract', () => {
+test('codex observer provider uses configurable reasoning effort in every command path', () => {
   skipOnWindows();
+  const prompt = 'prompt with spaces; $(not-run)';
+  for (const [codexHome, usePromptPath] of [
+    ['/tmp/ecc-codex-home', false],
+    ['/tmp/ecc-codex-home', true],
+    ['', false],
+    ['', true],
+  ]) {
+    const result = runProviderRunner({
+      provider: 'codex',
+      codexHome,
+      prompt,
+      promptPath: usePromptPath,
+    });
+    assert.strictEqual(result.status, 0, result.stderr);
+    const argv = result.codexRecord.argv;
+    assert.deepStrictEqual(
+      argv.slice(argv.indexOf('-c'), argv.indexOf('-c') + 2),
+      ['-c', 'model_reasoning_effort=medium']
+    );
+    assert.strictEqual(argv[argv.length - 1], usePromptPath ? '-' : prompt);
+    assert.strictEqual(result.codexRecord.codexHome, codexHome);
+  }
+
+  for (const reasoningEffort of ['low', 'high']) {
+    const result = runProviderRunner({ provider: 'codex', reasoningEffort });
+    assert.strictEqual(result.status, 0, result.stderr);
+    const argv = result.codexRecord.argv;
+    assert.deepStrictEqual(
+      argv.slice(argv.indexOf('-c'), argv.indexOf('-c') + 2),
+      ['-c', `model_reasoning_effort=${reasoningEffort}`]
+    );
+  }
+});
+
+test('codex observer provider preserves command safeguards and has no hardcoded low effort', () => {
+  skipOnWindows();
+  const content = fs.readFileSync(observerProviderRunnerPath, 'utf8');
+  assert.strictEqual((content.match(/model_reasoning_effort=\"low\"/g) || []).length, 0);
+  assert.strictEqual(
+    (content.match(/model_reasoning_effort=\"\$codex_reasoning_effort\"/g) || []).length,
+    4
+  );
   const prompt = 'prompt with spaces; $(not-run)';
   const result = runProviderRunner({
     provider: 'codex',
@@ -679,10 +734,6 @@ test('codex observer provider command contract', () => {
   assert.ok(argv.includes('--ignore-user-config'));
   assert.ok(argv.includes('--skip-git-repo-check'));
   assert.deepStrictEqual(argv.slice(argv.indexOf('-m'), argv.indexOf('-m') + 2), ['-m', 'gpt-5-codex']);
-  assert.deepStrictEqual(
-    argv.slice(argv.indexOf('-c'), argv.indexOf('-c') + 2),
-    ['-c', 'model_reasoning_effort=low']
-  );
   assert.deepStrictEqual(argv.slice(argv.indexOf('-s'), argv.indexOf('-s') + 2), ['-s', 'read-only']);
   assert.deepStrictEqual(argv.slice(argv.indexOf('-C'), argv.indexOf('-C') + 2), ['-C', result.codexPaths.workingDir]);
   assert.deepStrictEqual(

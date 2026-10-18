@@ -41,6 +41,7 @@ case "$provider" in
       echo "codex observer working directory is required" >&2
       exit 2
     fi
+    codex_reasoning_effort="${ECC_OBSERVER_CODEX_REASONING_EFFORT:-medium}"
     # Keep direct callers compatible; the CLv2 loop supplies a private file.
     # A discarded stream is safer than mixing JSONL into the structured result.
     if [ -z "$event_path" ]; then
@@ -65,7 +66,7 @@ case "$provider" in
       if [ -n "$prompt_path" ]; then
         exec env CODEX_HOME="$ECC_OBSERVER_CODEX_HOME" codex --ask-for-approval never exec \
           --ephemeral --ignore-user-config --skip-git-repo-check --json \
-          "${codex_model_args[@]}" -c model_reasoning_effort="low" -s read-only \
+          "${codex_model_args[@]}" -c model_reasoning_effort="$codex_reasoning_effort" -s read-only \
           -C "$working_dir" --output-schema "$schema_path" -o "$result_path" \
           "${codex_prompt_args[@]}" < "$prompt_path" > "$event_path"
       fi
@@ -75,7 +76,7 @@ case "$provider" in
         --skip-git-repo-check \
         --json \
         "${codex_model_args[@]}" \
-        -c model_reasoning_effort="low" \
+        -c model_reasoning_effort="$codex_reasoning_effort" \
         -s read-only \
         -C "$working_dir" \
         --output-schema "$schema_path" \
@@ -86,7 +87,7 @@ case "$provider" in
     if [ -n "$prompt_path" ]; then
       exec codex --ask-for-approval never exec \
         --ephemeral --ignore-user-config --skip-git-repo-check --json \
-        "${codex_model_args[@]}" -c model_reasoning_effort="low" -s read-only \
+        "${codex_model_args[@]}" -c model_reasoning_effort="$codex_reasoning_effort" -s read-only \
         -C "$working_dir" --output-schema "$schema_path" -o "$result_path" \
         "${codex_prompt_args[@]}" < "$prompt_path" > "$event_path"
     fi
@@ -96,7 +97,7 @@ case "$provider" in
       --skip-git-repo-check \
       --json \
       "${codex_model_args[@]}" \
-      -c model_reasoning_effort="low" \
+      -c model_reasoning_effort="$codex_reasoning_effort" \
       -s read-only \
       -C "$working_dir" \
       --output-schema "$schema_path" \
