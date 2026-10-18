@@ -1178,10 +1178,88 @@ def _validate_observed_timestamp(value: object) -> str:
     return observed
 
 
-def _validate_ingest_payload(raw: str) -> list[dict]:
+def _load_observer_evidence(path: Path) -> dict[str, dict]:
+    records = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"unable to read evidence file: {exc}") from exc
+    for line_number, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"malformed evidence JSON on line {line_number}: {exc.msg}") from exc
+        if not isinstance(record, dict):
+            raise ValueError(f"evidence record on line {line_number} must be an object")
+        reference = record.get("_observer_ref")
+        if not isinstance(reference, str) or re.fullmatch(r"obs-[0-9]{6}", reference) is None:
+            raise ValueError(f"invalid observation reference on line {line_number}")
+        if reference in records:
+            raise ValueError(f"duplicate observation reference: {reference}")
+        records[reference] = record
+    if not records:
+        raise ValueError("evidence file must contain at least one observation")
+    return records
+
+
+def _trusted_observation_provenance(records: dict[str, dict], references: object) -> tuple[int, list[str], str]:
+    if not isinstance(references, list) or not references:
+        raise ValueError("evidence.observation_refs must be a non-empty array of observation references")
+    selected = []
+    seen = set()
+    for reference in references:
+        if not isinstance(reference, str) or re.fullmatch(r"obs-[0-9]{6}", reference) is None:
+            raise ValueError("evidence.observation_refs must contain valid observation references")
+        if reference not in records:
+            raise ValueError(f"unknown observation reference: {reference}")
+        if reference not in seen:
+            selected.append(records[reference])
+            seen.add(reference)
+
+    count = 0
+    session_ids = []
+    timestamps = []
+    for record in selected:
+        compaction = record.get("_compaction")
+        if compaction is None:
+            occurrences = 1
+            sessions = [record.get("session")]
+            observed_timestamps = [record.get("timestamp")]
+        else:
+            if not isinstance(compaction, dict):
+                raise ValueError("observation _compaction must be an object")
+            occurrences = compaction.get("raw_occurrences")
+            sessions = compaction.get("sessions")
+            observed_timestamps = compaction.get("timestamps")
+            if not isinstance(occurrences, int) or isinstance(occurrences, bool) or occurrences < 1:
+                raise ValueError("observation _compaction.raw_occurrences must be a positive integer")
+            if not isinstance(sessions, list) or not isinstance(observed_timestamps, list):
+                raise ValueError("observation _compaction metadata must contain sessions and timestamps arrays")
+        if not sessions or not all(isinstance(session, str) and session for session in sessions):
+            raise ValueError("observation session metadata must contain at least one non-empty session")
+        for session in sessions:
+            normalized_session = _validate_model_text(
+                session, "observation session", max_length=128, single_line=True
+            )
+            if normalized_session not in session_ids:
+                session_ids.append(normalized_session)
+        for timestamp in observed_timestamps:
+            if _parse_observed(timestamp) is not None:
+                timestamps.append(_validate_observed_timestamp(timestamp))
+        count += occurrences
+
+    if not timestamps:
+        raise ValueError("observation timestamp metadata must contain a valid timezone-aware timestamp")
+    last_observed = max(timestamps, key=lambda value: _parse_observed(value))
+    return count, session_ids, last_observed
+
+
+def _validate_ingest_payload(raw: str, evidence_records: dict[str, dict]) -> list[dict]:
     allowed_payload_keys = {"status", "instincts"}
     allowed_instinct_keys = {"id", "trigger", "domain", "action", "evidence"}
-    allowed_evidence_keys = {"count", "session_ids", "pattern", "last_observed"}
+    allowed_evidence_keys = {"observation_refs", "pattern"}
 
     try:
         payload = json.loads(raw)
@@ -1229,32 +1307,16 @@ def _validate_ingest_payload(raw: str) -> list[dict]:
             raise ValueError(
                 f"instinct[{index}].evidence contains unexpected fields: {', '.join(unexpected)}"
             )
-        missing_evidence = [
-            key for key in ("count", "pattern", "last_observed", "session_ids")
-            if key not in evidence
-        ]
+        missing_evidence = [key for key in ("observation_refs", "pattern") if key not in evidence]
         if missing_evidence:
             raise ValueError(f"instinct[{index}].evidence missing required fields: {', '.join(missing_evidence)}")
-        count = evidence["count"]
-        if not isinstance(count, int) or isinstance(count, bool):
-            raise ValueError("evidence.count must be an integer")
-        session_ids = evidence["session_ids"]
-        if not isinstance(session_ids, list):
-            raise ValueError("evidence.session_ids must be an array of strings")
-        normalized_session_ids = [
-            _validate_model_text(item, "evidence.session_ids[]", max_length=128, single_line=True)
-            for item in session_ids
-        ]
-        session_ids = list(dict.fromkeys(normalized_session_ids))
-        if not session_ids:
-            raise ValueError("evidence.session_ids must contain at least one unique session")
-        if len(session_ids) > count:
-            raise ValueError("evidence.session_ids cannot contain more unique sessions than evidence.count")
+        count, session_ids, last_observed = _trusted_observation_provenance(
+            evidence_records, evidence["observation_refs"]
+        )
         confidence = _ingest_confidence(count, len(session_ids))
         trigger = _validate_model_text(instinct["trigger"], "trigger", max_length=500, single_line=True)
         action = _validate_model_text(instinct["action"], "action", max_length=8000)
         pattern = _validate_model_text(evidence["pattern"], "evidence.pattern", max_length=2000)
-        last_observed = _validate_observed_timestamp(evidence["last_observed"])
         validated.append({
             "id": instinct_id,
             "trigger": trigger,
@@ -1370,7 +1432,11 @@ def cmd_ingest(args) -> int:
         result_path = _validate_file_path(args.result, must_exist=True)
         if not result_path.is_file():
             raise ValueError(f"Path is not a file: {result_path}")
-        instincts = _validate_ingest_payload(result_path.read_text(encoding="utf-8"))
+        evidence_path = _validate_file_path(args.evidence_file, must_exist=True)
+        if not evidence_path.is_file():
+            raise ValueError(f"Path is not a file: {evidence_path}")
+        evidence_records = _load_observer_evidence(evidence_path)
+        instincts = _validate_ingest_payload(result_path.read_text(encoding="utf-8"), evidence_records)
     except (OSError, UnicodeDecodeError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -2572,6 +2638,7 @@ def main() -> int:
     # Ingest observer analysis
     ingest_parser = subparsers.add_parser('ingest', help='Ingest observer-analysis JSON')
     ingest_parser.add_argument('result', help='Structured observer-analysis JSON')
+    ingest_parser.add_argument('--evidence-file', required=True, help='Exact selected observer JSONL evidence file')
     ingest_parser.add_argument('--dry-run', action='store_true', help='Validate and preview without writing')
 
     # Export

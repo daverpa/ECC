@@ -69,6 +69,23 @@ function runAnalysisPayloadHelper(helper, input, budget) {
   }
 }
 
+function runReferencedAnalysisPayload(input, budget) {
+  const testDir = createTempDir();
+  const source = path.join(testDir, 'analysis.jsonl');
+  fs.writeFileSync(source, input);
+  try {
+    const result = spawnSync(
+      'bash',
+      ['-c', 'source "$1"; observer_tmp_dir="$2"; python_cmd=python3; assign_observer_refs "$3"; limit_analysis_payload "$3" "$4"', 'bash', observerLoopPath, testDir, source, budget],
+      { encoding: 'utf8' }
+    );
+    assert.strictEqual(result.status, 0, `referenced analysis pipeline failed: ${result.stderr}`);
+    return fs.readFileSync(source, 'utf8');
+  } finally {
+    cleanupDir(testDir);
+  }
+}
+
 function runAnalysisCharBudget(value) {
   const result = spawnSync(
     'bash',
@@ -459,6 +476,18 @@ test('compacted character budget omits an oversized newest record and retains ol
 test('compacted character budget preserves compaction metadata byte-for-byte', () => {
   const record = `${JSON.stringify({ id: 'repeat', _compaction: { raw_occurrences: 7, sessions: ['s1', 's2'] } })}\n`;
   assert.strictEqual(runAnalysisPayloadHelper('limit_analysis_payload', record, record.length), record);
+});
+
+test('final character budget includes host observer-reference overhead', () => {
+  const records = [
+    JSON.stringify({ id: 'older', payload: 'x'.repeat(40) }) + '\n',
+    JSON.stringify({ id: 'newer' }) + '\n',
+  ];
+  const annotatedNewest = JSON.stringify({ id: 'newer', _observer_ref: 'obs-000002' }) + '\n';
+  const budget = Buffer.byteLength(records[0], 'utf8');
+  const selected = runReferencedAnalysisPayload(records.join(''), budget);
+  assert.strictEqual(selected, annotatedNewest);
+  assert.ok(Buffer.byteLength(selected, 'utf8') <= budget);
 });
 
 test('invalid compacted character budgets fall back to 950000', () => {

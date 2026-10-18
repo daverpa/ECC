@@ -58,21 +58,16 @@
             "type": "object",
             "additionalProperties": false,
             "required": [
-              "count",
-              "session_ids",
-              "pattern",
-              "last_observed"
+              "observation_refs",
+              "pattern"
             ],
             "properties": {
-              "count": {
-                "type": "integer",
-                "minimum": 3
-              },
-              "session_ids": {
+              "observation_refs": {
                 "type": "array",
                 "minItems": 1,
                 "items": {
                   "type": "string",
+                  "pattern": "^obs-[0-9]{6}$",
                   "minLength": 1,
                   "maxLength": 256
                 }
@@ -81,10 +76,6 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 4000
-              },
-              "last_observed": {
-                "type": "string",
-                "format": "date-time"
               }
             }
           }
